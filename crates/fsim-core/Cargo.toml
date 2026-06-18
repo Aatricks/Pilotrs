@@ -1,0 +1,18 @@
+[package]
+name = "fsim-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared types, reference-frame conventions, and message vocabulary for the Pilotrs 6DOF flight simulator. no_std-clean."
+
+[features]
+default = ["std"]
+std = ["nalgebra/std", "num-traits/std"]
+
+[dependencies]
+nalgebra.workspace = true
+num-traits.workspace = true
+libm.workspace = true

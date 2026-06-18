@@ -1,0 +1,55 @@
+# Pilotrs — 6DOF flight simulator + autopilot (virtual workspace, no root package).
+#
+# The `core -> ... -> control` crates form a no_std-clean "flight-control" ring:
+# they must build with `--no-default-features`. All OS/GPU/windowing baggage is
+# quarantined in the `fsim-viz` leaf crate. See the plan and crate docs.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+# MSRV pinned at/below Ferrocene's tracked upstream so the code stays
+# Ferrocene-compatible by construction. Develop on stable; swap in Ferrocene
+# via criticalup.toml once a subscription token exists.
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+authors = ["Aatricks"]
+repository = "https://github.com/Aatricks/Pilotrs"
+
+[workspace.dependencies]
+# --- internal crates ---
+fsim-core = { path = "crates/fsim-core", default-features = false }
+fsim-dynamics = { path = "crates/fsim-dynamics", default-features = false }
+fsim-actuators = { path = "crates/fsim-actuators", default-features = false }
+fsim-sensors = { path = "crates/fsim-sensors", default-features = false }
+fsim-estimator = { path = "crates/fsim-estimator", default-features = false }
+fsim-control = { path = "crates/fsim-control", default-features = false }
+fsim-sim = { path = "crates/fsim-sim" }
+
+# --- math (no_std via libm; static-sized types keep the hot loop alloc-free) ---
+nalgebra = { version = "0.35", default-features = false, features = ["libm"] }
+num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+libm = "0.2"
+
+# --- deterministic RNG for sensor noise (ChaCha8, seeded; never thread_rng) ---
+rand = { version = "0.10", default-features = false }
+rand_distr = { version = "0.6", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
+
+# --- visualization (std-only, quarantined in fsim-viz) ---
+# three-d 0.19 bundles egui 0.34.3, so egui_plot must track egui 0.34. We import
+# egui via `three_d::egui` to guarantee a single egui version in the graph.
+three-d = "0.19"
+egui_plot = "0.35"
+
+# --- testing ---
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Faster math in debug so the 1 kHz loop is usable while developing.
+[profile.dev]
+opt-level = 1

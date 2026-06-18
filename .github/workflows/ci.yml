@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Format, lint, and test the flight-control core + sim. The viz crate is
+  # excluded here because it needs system GPU/windowing libraries; it gets its
+  # own build job below.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --exclude fsim-viz --all-targets
+      - name: test
+        run: cargo test --workspace --exclude fsim-viz
+
+  # Prove the no_std boundary: the whole flight-control ring must build with
+  # default features (i.e. `std`) off. This is what keeps a future Ferrocene /
+  # embedded firmware split possible.
+  no-std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build core ring without std
+        run: >
+          cargo build --no-default-features
+          -p fsim-core -p fsim-dynamics -p fsim-actuators
+          -p fsim-sensors -p fsim-estimator -p fsim-control
+
+  # MSRV gate: keep the code building on the Ferrocene-tracked upstream (1.91).
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+      - name: build on MSRV (core + sim)
+        run: cargo build --workspace --exclude fsim-viz
+
+  # The viz leaf needs system libraries (GL, X11, etc.); build-check it
+  # separately so a graphics-stack issue never blocks core CI.
+  viz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libwayland-dev libx11-dev
+      - name: build viz
+        run: cargo build -p fsim-viz

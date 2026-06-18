@@ -1,0 +1,21 @@
+[package]
+name = "fsim-sim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Deterministic fixed-step scheduler wiring the full simulator loop, with headless run + telemetry."
+
+[dependencies]
+fsim-core.workspace = true
+fsim-dynamics.workspace = true
+fsim-actuators.workspace = true
+fsim-sensors.workspace = true
+fsim-estimator.workspace = true
+fsim-control.workspace = true
+nalgebra.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

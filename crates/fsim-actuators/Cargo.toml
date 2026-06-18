@@ -1,0 +1,18 @@
+[package]
+name = "fsim-actuators"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Control-allocation mixer and first-order motor model for a quadrotor. no_std-clean."
+
+[features]
+default = ["std"]
+std = ["fsim-core/std", "nalgebra/std"]
+
+[dependencies]
+fsim-core.workspace = true
+nalgebra.workspace = true
+num-traits.workspace = true

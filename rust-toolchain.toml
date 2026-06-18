@@ -1,0 +1,7 @@
+# Day-to-day development uses stable Rust. The code is kept Ferrocene-compatible
+# (MSRV 1.91, no_std-clean core ring); to build with the Ferrocene compiler
+# instead, install the toolchain from criticalup.toml and use
+# `criticalup run cargo build` (requires a Ferrocene subscription token).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

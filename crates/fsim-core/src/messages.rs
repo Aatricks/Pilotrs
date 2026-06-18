@@ -1,0 +1,103 @@
+//! The vocabulary that flows between subsystems. Kept in `fsim-core` so every
+//! crate shares one definition and nothing depends on anything but core.
+
+use crate::{Quat, Real, Vec3};
+
+/// Net external load applied to the rigid body for one integration step.
+#[derive(Debug, Clone, Copy)]
+pub struct Wrench {
+    /// Resultant force in the NED world frame \[N\].
+    pub force_world: Vec3,
+    /// Resultant moment in the **body** frame \[N·m\].
+    pub moment_body: Vec3,
+}
+
+impl Wrench {
+    /// Zero force and moment.
+    pub fn zero() -> Self {
+        Self {
+            force_world: Vec3::zeros(),
+            moment_body: Vec3::zeros(),
+        }
+    }
+}
+
+/// A raw IMU sample (what the estimator's predict step consumes).
+///
+/// The accelerometer measures **specific force** in the body frame (gravity
+/// reaction included): at rest it reads `+g` "up" along body `-z`, not zero.
+#[derive(Debug, Clone, Copy)]
+pub struct ImuMeas {
+    /// Specific force in the body frame \[m/s^2\].
+    pub accel: Vec3,
+    /// Angular rate in the body frame \[rad/s\].
+    pub gyro: Vec3,
+}
+
+/// The estimator's best estimate of the state (what the controller acts on —
+/// it never sees truth). Mirrors [`crate::State13`]; fields the current
+/// estimator can't observe are filled best-effort (e.g. zero).
+#[derive(Debug, Clone, Copy)]
+pub struct EstState {
+    /// Estimated position, NED world \[m\].
+    pub position: Vec3,
+    /// Estimated velocity, NED world \[m/s\].
+    pub velocity: Vec3,
+    /// Estimated attitude `q_{world<-body}`.
+    pub attitude: Quat,
+    /// Estimated body angular rate \[rad/s\].
+    pub angular_rate: Vec3,
+}
+
+impl EstState {
+    /// Level, at the origin, at rest.
+    pub fn at_rest() -> Self {
+        Self {
+            position: Vec3::zeros(),
+            velocity: Vec3::zeros(),
+            attitude: Quat::identity(),
+            angular_rate: Vec3::zeros(),
+        }
+    }
+}
+
+/// Setpoint fed to the autopilot. For the M1 attitude controller this is a
+/// desired attitude plus a collective thrust; outer loops (M3) will populate it
+/// from position/velocity/waypoint guidance.
+#[derive(Debug, Clone, Copy)]
+pub struct Setpoint {
+    /// Desired attitude `q_{world<-body}`.
+    pub attitude: Quat,
+    /// Desired collective thrust \[N\] (sum across motors).
+    pub thrust: Real,
+}
+
+impl Setpoint {
+    /// Hold level attitude at the given collective thrust.
+    pub fn level(thrust: Real) -> Self {
+        Self {
+            attitude: Quat::identity(),
+            thrust,
+        }
+    }
+}
+
+/// The controller's output: collective thrust + desired body torque. The mixer
+/// turns this into individual motor commands.
+#[derive(Debug, Clone, Copy)]
+pub struct CtrlCmd {
+    /// Collective thrust \[N\].
+    pub thrust: Real,
+    /// Desired moment in the body frame \[N·m\] (roll, pitch, yaw).
+    pub torque: Vec3,
+}
+
+impl CtrlCmd {
+    /// Zero thrust and torque.
+    pub fn zero() -> Self {
+        Self {
+            thrust: 0.0,
+            torque: Vec3::zeros(),
+        }
+    }
+}

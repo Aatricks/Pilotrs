@@ -1,0 +1,18 @@
+[package]
+name = "fsim-dynamics"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "6DOF rigid-body plant (Newton-Euler EOM) and RK4 integrator. no_std-clean."
+
+[features]
+default = ["std"]
+std = ["fsim-core/std", "nalgebra/std"]
+
+[dependencies]
+fsim-core.workspace = true
+nalgebra.workspace = true
+num-traits.workspace = true

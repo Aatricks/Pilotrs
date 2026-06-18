@@ -1,0 +1,25 @@
+# Ferrocene toolchain pin (DORMANT until a subscription token is configured).
+#
+# `aarch64-apple-darwin` is a supported, full-std Ferrocene host, but the
+# prebuilt binaries criticalup downloads require an authenticated Ferrocene
+# subscription (the source is open; the binaries are gated). With a token:
+#
+#   criticalup auth set                 # paste token from customers.ferrocene.dev
+#   criticalup install                  # reads this file
+#   criticalup run cargo build          # builds with the Ferrocene compiler
+#
+# NOTE: verify the exact current `release` string against the Ferrocene portal;
+# pick the release whose tracked upstream is >= our MSRV (1.91).
+manifest-version = 1
+
+[products.ferrocene]
+release = "stable-26.02.0"
+packages = [
+    "cargo-${rustc-host}",
+    "rustc-${rustc-host}",
+    "clippy-${rustc-host}",
+    "rustfmt-${rustc-host}",
+    "rust-std-${rustc-host}",
+    "llvm-tools-${rustc-host}",
+    "rust-src",
+]

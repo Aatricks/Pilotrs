@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# criticalup writes installation state here when a Ferrocene toolchain is installed
+.criticalup/

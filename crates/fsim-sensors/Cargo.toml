@@ -1,0 +1,21 @@
+[package]
+name = "fsim-sensors"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Sensor models (IMU now; GPS/baro/mag later) that degrade truth into noisy measurements with seeded RNG. no_std-clean."
+
+[features]
+default = ["std"]
+std = ["fsim-core/std", "nalgebra/std"]
+
+[dependencies]
+fsim-core.workspace = true
+nalgebra.workspace = true
+num-traits.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+rand_chacha.workspace = true
