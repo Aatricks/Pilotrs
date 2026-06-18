@@ -94,16 +94,22 @@ impl Default for Terrain {
         Self {
             seed: 0x5EED_1234,
             half_extent: 2400.0,
-            amplitude: 60.0,
-            valley_depth: 150.0,
+            // Real mountains: peaks to +320 m above the datum, valleys to −120 m
+            // — ~440 m of relief over the ~4.8 km map reads as steep ranges, not
+            // a gentle plain. The fixed-wing's cruise/route altitude is lifted
+            // above the peaks (see main.rs) so it flies over them, not through.
+            amplitude: 320.0,
+            valley_depth: 120.0,
             base_wavelength: 1400.0,
             octaves: 7,
             lacunarity: 2.0,
             gain: 0.5,
-            sea_level: -70.0,
+            sea_level: -80.0,
             home_level: -12.0,
             home_inner: 170.0,
-            home_outer: 600.0,
+            // Blend the flat clearing out over a longer span so the airfield
+            // rises into the surrounding mountains rather than walling up.
+            home_outer: 800.0,
         }
     }
 }
@@ -635,9 +641,14 @@ mod tests {
             assert!((len - 1.0).abs() < 1e-4, "normal not unit: len = {len}");
             assert!(nrm.z < 0.0, "normal should point up (-z in NED): {:?}", nrm);
         }
-        // On average, terrain is fairly flat ⇒ mean up-component (-z) is high.
+        // The terrain is mountainous, so slopes are real — but normals must still
+        // point UP on average (mean up-component −z is negative and dominant),
+        // which is what keeps both the 3D light and the minimap hillshade lit.
         let mean_z: f32 = normals.iter().map(|n| n.z).sum::<f32>() / normals.len() as f32;
-        assert!(mean_z < -0.7, "terrain should be mostly gentle: {mean_z}");
+        assert!(
+            mean_z < -0.4,
+            "normals should point up on average: {mean_z}"
+        );
     }
 
     /// Triangle winding agrees with the upward per-vertex normals: the

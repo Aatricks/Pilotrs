@@ -72,8 +72,13 @@ impl FixedWingConfig {
             kp_phi: 1.2,
             kd_phi: 0.15,
             kr: 0.2,
-            kp_chi: 0.8,
-            ki_chi: 0.1,
+            // Course loop: raised bandwidth (kp 0.8→1.4, ki 0.1→0.3) so the bank
+            // tracks the commanded course crisply. A slow course loop under the
+            // line-following vector field is what makes the ground track snake;
+            // a faster, still-well-damped loop (ζ≈0.8) converges cleanly. See the
+            // k_path note in fw_guidance.rs — the two are tuned together.
+            kp_chi: 1.4,
+            ki_chi: 0.3,
             phi_max: 0.52, // 30°
             kp_theta: 1.0,
             ki_theta: 0.3,

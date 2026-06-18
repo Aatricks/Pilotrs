@@ -55,7 +55,7 @@ an aerodynamic plant + trim + its own autopilot:
   only the wrench and the autopilot differ. The Aerosonde climbs, turns, and
   changes speed under autopilot, all deterministic and headless.
 
-157 tests pass across the workspace, the core ring builds `no_std`, and runs are
+158 tests pass across the workspace, the core ring builds `no_std`, and runs are
 bit-for-bit deterministic.
 
 ## Workspace layout
@@ -85,7 +85,7 @@ The `core → … → control` crates form a **`no_std`-clean flight-control rin
 ## Running
 
 ```bash
-cargo test  --workspace                          # the full test suite (157 tests)
+cargo test  --workspace                          # the full test suite (158 tests)
 cargo run   -p fsim-sim --example headless        # INS flies a square mission + M2 contrast
 cargo run   -p fsim-sim --release --example montecarlo     # parallel Monte-Carlo (faster-than-real-time)
 cargo run   -p fsim-sim --release --example pid_vs_lqr      # PID vs LQR step-response + mission A/B
@@ -96,14 +96,17 @@ cargo run   -p fsim-viz --release                 # the interactive 3D viewer (s
 
 In the viewer: an **airframe toggle** flies either the quad or the fixed-wing
 over a **procedural elevation terrain** — a ~4.8 km island of slope-shaded
-ranges (water → shore → grass → rock → snow) ringed by an ocean horizon, with a
-flat **home airfield clearing** at the origin so an aircraft spawned at the datum
-always sits *above* the ground. The **Route planner** minimap is a top-down
-shaded-relief map — click to drop waypoints, drag to move, right-click to remove
-— and **Fly route** dispatches it to the active aircraft (the quad as an INS
-waypoint mission, the fixed-wing as vector-field line guidance). The larger world
-gives the fixed-wing's ~110 m turn radius room to actually track a hand-drawn
-route. The camera follows the aircraft as it ranges over the map. The **Flight controls** window switches the estimator (CF / MEKF / INS),
+**mountain ranges** rising ~320 m (water → shore → grass → rock → snow) ringed by
+an ocean horizon, with a flat **home airfield clearing** at the origin so an
+aircraft spawned at the datum always sits *above* the ground. The quad flies its
+mission inside that clearing; the fixed-wing cruises *above* the peaks. The
+**Route planner** minimap is a top-down shaded-relief map — click to drop
+waypoints, drag to move, right-click to remove — and **Fly route** dispatches it
+to the active aircraft (the quad as an INS waypoint mission, the fixed-wing as
+vector-field line guidance, tuned so the ground track converges onto each leg
+smoothly instead of snaking). The larger world gives the fixed-wing's ~110 m turn
+radius room to actually track a hand-drawn route. The camera follows the aircraft
+as it ranges over the map. The **Flight controls** window switches the estimator (CF / MEKF / INS),
 the inner controller (PID / LQR), and sets the attitude / cruise setpoint; the
 telemetry window plots estimate-vs-truth-vs-setpoint (quad) or airspeed /
 altitude / course (fixed-wing).

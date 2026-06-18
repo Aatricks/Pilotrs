@@ -123,7 +123,12 @@ fn quad_guidance() -> GuidanceConfig {
 fn make_source(ui: &Ui) -> Source {
     if ui.fixed_wing {
         // Fixed-wing flies on truth feedback; routes are drawn on the minimap.
-        Source::live_fixedwing(FwSimConfig::aerosonde_cruise())
+        // Spawn it above the mountain peaks (≈320 m) so level cruise and routes
+        // fly over the terrain, not through it (the sim has no terrain collision).
+        let mut cfg = FwSimConfig::aerosonde_cruise();
+        cfg.initial.position.z = -(ui.fw_altitude as f64);
+        cfg.setpoint.altitude = ui.fw_altitude as f64;
+        Source::live_fixedwing(cfg)
     } else {
         // Quad missions need the INS estimator (M3) — `build_cfg(2, _)` — or the
         // worker silently counts SetMission as rejected.
@@ -255,17 +260,17 @@ fn main() {
     // for the ~4.8 km terrain; the orbit target follows the aircraft each frame.
     let mut camera = Camera::new_perspective(
         window.viewport(),
-        vec3(220.0, 220.0, -190.0),
-        vec3(0.0, 0.0, -30.0),
+        vec3(350.0, 350.0, -360.0),
+        vec3(0.0, 0.0, -20.0),
         vec3(0.0, 0.0, -1.0),
         degrees(45.0),
         // Near 2 m (the orbit min distance is 3 m): keeps depth precision sane
-        // across the now-12 km far plane so distant terrain and the sea don't
-        // z-fight on the horizon.
+        // across the far plane so distant mountains and the sea don't z-fight on
+        // the horizon.
         2.0,
-        12000.0,
+        14000.0,
     );
-    let mut control = OrbitControl::new(vec3(0.0, 0.0, -30.0), 3.0, 5000.0);
+    let mut control = OrbitControl::new(vec3(0.0, 0.0, -20.0), 3.0, 6000.0);
 
     let ambient = AmbientLight::new(&context, 0.55, Srgba::WHITE);
     // Light travelling +z (downward in NED) so it lands on the upward (−z) faces.
@@ -350,7 +355,7 @@ fn main() {
         yaw: 0.0,
         thrust: hover as f32,
         fw_airspeed: 25.0,
-        fw_altitude: 120.0,
+        fw_altitude: 400.0, // above the ~320 m mountain peaks
         fw_route_on: false,
         paused: false,
         speed: 1.0,
@@ -696,7 +701,7 @@ fn controls_window(
                     ui.label("Fixed-wing cruise (or draw a route on the minimap)");
                     ui.add(egui::Slider::new(&mut st.fw_airspeed, 12.0..=35.0).text("airspeed"));
                     ui.add(
-                        egui::Slider::new(&mut st.fw_altitude, 20.0..=200.0).text("altitude (m)"),
+                        egui::Slider::new(&mut st.fw_altitude, 50.0..=800.0).text("altitude (m)"),
                     );
                     ui.add(egui::Slider::new(&mut st.yaw, -180.0..=180.0).text("course (deg)"));
                     if let Some(idx) = view.waypoint_index {

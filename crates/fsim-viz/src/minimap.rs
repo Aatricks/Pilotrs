@@ -58,9 +58,10 @@ impl Default for Route {
     fn default() -> Self {
         Self {
             wps: Vec::new(),
-            // Above the terrain's ~60 m peaks so a fixed-wing route doesn't fly
-            // into a ridge (the sim has no terrain collision, but it looks wrong).
-            alt_up: 100.0,
+            // Above the terrain's ~320 m mountain peaks so a fixed-wing route
+            // flies over the ridges, not through them (the sim has no terrain
+            // collision, but flying through a mountain looks wrong).
+            alt_up: 400.0,
             cruise: 25.0,
         }
     }
@@ -259,7 +260,7 @@ impl Minimap {
 
                 // Controls below the map.
                 ui.add_space(4.0);
-                ui.add(egui::Slider::new(&mut route.alt_up, 0.0..=200.0).text("route alt (m, up)"));
+                ui.add(egui::Slider::new(&mut route.alt_up, 0.0..=800.0).text("route alt (m, up)"));
                 if is_fixed_wing {
                     ui.add(egui::Slider::new(&mut route.cruise, 12.0..=35.0).text("cruise (m/s)"));
                 }

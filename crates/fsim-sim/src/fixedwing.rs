@@ -391,6 +391,48 @@ mod tests {
         );
     }
 
+    // T-NoSnake: with the SHIPPED defaults (autopilot gains + guidance k_path),
+    // the closed-loop ground track converges onto a straight line and HOLDS it
+    // without the left/right S-turns the old tuning produced. We measure the
+    // steady-state cross-track amplitude and the number of sign changes
+    // (oscillations) over the back half of a long run.
+    #[test]
+    fn line_following_does_not_snake() {
+        use crate::fw_guidance::FwGuidanceConfig;
+        let cfg = FwGuidanceConfig::default(); // shipped k_path / chi_inf
+        let mut sim = cruise_sim(); // starts (0,0,-100), 25 m/s North
+                                    // Due-North path 80 m East: the craft starts 80 m West of it.
+        let origin = Vec3::new(0.0, 80.0, -100.0);
+        let path = 0.0_f64;
+        let mut xt = Vec::new();
+        for _ in 0..1400 {
+            let course = line_course(sim.truth().position, origin, path, cfg.chi_inf, cfg.k_path);
+            sim.set_setpoint(FixedWingSetpoint {
+                airspeed: 25.0,
+                altitude: 100.0,
+                course,
+            });
+            sim.run_headless(100); // re-aim every 0.1 s (140 s total)
+            xt.push(cross_track(sim.truth().position, origin, path));
+        }
+        // Back half = settled flight. Amplitude must be small and the track must
+        // not keep crossing the line back and forth (the snaking signature).
+        let tail = &xt[700..];
+        let max_amp = tail.iter().fold(0.0_f64, |m, &e| m.max(e.abs()));
+        let sign_changes = tail
+            .windows(2)
+            .filter(|w| w[0] != 0.0 && w[1] != 0.0 && w[0].signum() != w[1].signum())
+            .count();
+        assert!(
+            max_amp < 4.0,
+            "steady-state cross-track amplitude too large (snaking): {max_amp} m"
+        );
+        assert!(
+            sign_changes <= 4,
+            "too many cross-track sign changes (snaking): {sign_changes}"
+        );
+    }
+
     // T-Determinism: the truth path has no RNG, so two runs are bit-identical.
     #[test]
     fn is_deterministic() {

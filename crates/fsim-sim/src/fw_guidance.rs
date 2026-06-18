@@ -55,15 +55,23 @@ pub struct FwGuidanceConfig {
 
 impl Default for FwGuidanceConfig {
     /// Sized for the Aerosonde (25 m/s, φ_max = 30° → R ≈ 110 m). The 120 m
-    /// accept radius is just above one turn radius so corners are capturable;
-    /// `chi_inf` / `k_path` match the values exercised by the existing
-    /// `straight_line_guidance_converges` test (0.9 rad, 0.05 /m).
+    /// accept radius is just above one turn radius so corners are capturable.
+    ///
+    /// `k_path` is deliberately *gentle* (0.01 /m, not the 0.05 the raw
+    /// `line_course` unit test uses). The cross-track loop is the course loop
+    /// wrapped by the vector field: if the field demands cross-track correction
+    /// faster than the course loop's bandwidth it under-damps and the ground
+    /// track snakes (visible left/right S-turns along a straight leg). At
+    /// 25 m/s, `k_path = 0.01` keeps the cross-track demand rate
+    /// (`χ∞·(2/π)·k_path·Va ≈ 0.14 /s`) comfortably below the course-loop
+    /// bandwidth (~0.34 rad/s with the tuned gains), so the path converges
+    /// smoothly. `chi_inf = 0.9` still gives a crisp intercept far from the line.
     fn default() -> Self {
         Self {
             airspeed: 25.0,
             accept_radius: 120.0,
             chi_inf: 0.9,
-            k_path: 0.05,
+            k_path: 0.01,
             terminal: TerminalAction::HoldCourse,
         }
     }
