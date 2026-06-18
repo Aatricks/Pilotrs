@@ -1,54 +1,74 @@
-//! Headless demo (no graphics): fly the M2 stack and show the MEKF estimating
-//! the IMU's hidden gyro bias and tracking truth, then contrast it with the
-//! complementary filter on the *same* sensor stream.
+//! Headless demo (no graphics) of the M3 stack: the 15-state INS flies a square
+//! waypoint mission with position/velocity control, realistic GPS/baro/mag
+//! noise, and motor lag. Prints waypoint progress + INS-vs-truth tracking, then
+//! the M2 contrast (MEKF estimates gyro bias; CF drifts).
 //!
 //! Run with `cargo run -p fsim-sim --example headless`.
 
-use fsim_sim::{EstimatorKind, Setpoint, Sim, SimConfig};
+use fsim_sim::{GuidanceConfig, Sim, SimConfig, Vec3, Waypoint};
 
 fn deg(r: f64) -> f64 {
     r.to_degrees()
 }
 
 fn main() {
-    // ---- MEKF in the loop, realistic biased sensors ----
-    let cfg = SimConfig::quad_250_m2();
-    let hover = cfg.hover_thrust();
-    let mut sim = Sim::new(cfg);
-    sim.set_setpoint(Setpoint::level(hover)); // level hover: bias is observable
-                                              // without sustained translation
+    // ---- M3: INS + position control flying a square mission ----
+    let mut sim = Sim::new(SimConfig::quad_250_m3());
+    sim.set_mission(
+        vec![
+            Waypoint::new(Vec3::new(0.0, 0.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(5.0, 0.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(5.0, 5.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(0.0, 5.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(0.0, 0.0, -2.0), 0.0),
+        ],
+        GuidanceConfig::default(),
+    );
 
-    println!("MEKF in the loop (realistic IMU with a hidden, wandering gyro bias)\n");
-    println!("  t[s]   att_err   | true gyro bias        | MEKF bias estimate");
-    println!("  ------------------------------------------------------------------");
-    for k in 0..=8000 {
+    println!("M3: 15-state INS flying a 5 m square mission (position control)\n");
+    println!("  t[s]  wp   truth N,E,Up [m]        INS est N,E,Up [m]      |est-truth|");
+    println!("  ------------------------------------------------------------------------");
+    let mut max_track = 0.0_f64;
+    for k in 0..30000 {
         sim.step();
-        if k % 1000 == 0 {
-            let err = deg(sim.truth().attitude.angle_to(&sim.estimate().attitude));
-            let tb = sim.true_gyro_bias();
-            let eb = sim.est_gyro_bias().unwrap();
+        if k > 2000 {
+            max_track = max_track.max((sim.truth().position - sim.estimate().position).norm());
+        }
+        if k % 3000 == 0 {
+            let t = *sim.truth();
+            let e = sim.estimate();
             println!(
-                "  {:4.1}   {:5.2}°   | ({:+.4},{:+.4},{:+.4}) | ({:+.4},{:+.4},{:+.4})",
+                "  {:4.1}   {}   ({:6.2},{:6.2},{:6.2})   ({:6.2},{:6.2},{:6.2})   {:.2}",
                 sim.time(),
-                err,
-                tb.x,
-                tb.y,
-                tb.z,
-                eb.x,
-                eb.y,
-                eb.z,
+                sim.waypoint_index().unwrap(),
+                t.position.x,
+                t.position.y,
+                -t.position.z,
+                e.position.x,
+                e.position.y,
+                -e.position.z,
+                (t.position - e.position).norm(),
             );
         }
     }
+    let p = sim.truth().position;
+    println!(
+        "\n  mission waypoint reached: {}/4   final pos ({:.2},{:.2},{:.2})   max |est-truth| (after settle): {:.2} m",
+        sim.waypoint_index().unwrap(),
+        p.x,
+        p.y,
+        -p.z,
+        max_track,
+    );
 
-    // ---- Fair head-to-head: same stream, CF vs MEKF, level/static truth ----
+    // ---- M2 contrast: MEKF estimates the gyro bias; the CF drifts ----
     use fsim_estimator::{ComplementaryFilter, Estimator, Mekf};
     use fsim_sensors::{Imu, Mag, Sensor, Truth};
     let c = SimConfig::quad_250_m2();
     let truth = fsim_sim::State13::at_rest();
     let bundle = Truth {
         state: &truth,
-        accel_world: fsim_sim::Vec3::zeros(),
+        accel_world: Vec3::zeros(),
         t: 0.0,
     };
     let mut imu = Imu::new(c.imu, c.seed);
@@ -65,22 +85,34 @@ fn main() {
             mekf.update_mag(&mm);
         }
     }
-    let cf_err = deg(truth.attitude.angle_to(&cf.state().attitude));
-    let mekf_err = deg(truth.attitude.angle_to(&mekf.state().attitude));
-    println!("\nHead-to-head after 30 s on the same biased-IMU stream (static truth):");
-    println!("  complementary filter attitude error: {cf_err:6.2}°  (yaw drifts on the gyro bias)");
-    println!("  MEKF                attitude error: {mekf_err:6.2}°  (bias estimated, mag-aided)");
+    println!("\nM2 estimator contrast (same biased-IMU stream, static truth, 30 s):");
+    println!(
+        "  complementary filter attitude error: {:6.2} deg  (yaw drifts on the gyro bias)",
+        deg(truth.attitude.angle_to(&cf.state().attitude))
+    );
+    println!(
+        "  MEKF                attitude error: {:6.2} deg  (bias estimated, mag-aided)",
+        deg(truth.attitude.angle_to(&mekf.state().attitude))
+    );
 
-    // Determinism still holds with the full M2 sensor suite.
+    // Determinism with the full M3 stack.
     let rerun = {
-        let mut s2 = Sim::new(SimConfig {
-            estimator_kind: EstimatorKind::Mekf,
-            ..SimConfig::quad_250_m2()
-        });
-        s2.set_setpoint(Setpoint::level(hover));
-        s2.run_headless(8001);
+        let mut s2 = Sim::new(SimConfig::quad_250_m3());
+        s2.set_mission(
+            vec![Waypoint::new(Vec3::new(2.0, 0.0, -2.0), 0.5)],
+            GuidanceConfig::default(),
+        );
+        s2.run_headless(5000);
         *s2.truth()
     };
-    let identical = rerun.to_vector() == sim.truth().to_vector();
-    println!("\n  deterministic re-run identical: {identical}");
+    let mut s3 = Sim::new(SimConfig::quad_250_m3());
+    s3.set_mission(
+        vec![Waypoint::new(Vec3::new(2.0, 0.0, -2.0), 0.5)],
+        GuidanceConfig::default(),
+    );
+    s3.run_headless(5000);
+    println!(
+        "\n  deterministic M3 re-run identical: {}",
+        rerun.to_vector() == s3.truth().to_vector()
+    );
 }

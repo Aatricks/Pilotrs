@@ -16,20 +16,32 @@
 //! y = East, z = Down). The camera's up vector is world `-z`, so altitude
 //! (`-z`) points up on screen.
 
-use fsim_sim::{Quat, Setpoint, Sim, SimConfig};
+use fsim_sim::{GuidanceConfig, Quat, Setpoint, Sim, SimConfig, Waypoint};
 use three_d::egui;
 use three_d::*;
 
 const DT: f64 = 0.001;
 
-/// M2: MEKF + realistic noisy sensors (with gyro bias). M1: complementary
-/// filter + light sensors. Switching estimator rebuilds the sim.
-fn make_cfg(mekf: bool) -> SimConfig {
-    if mekf {
-        SimConfig::quad_250_m2()
-    } else {
-        SimConfig::quad_250_mvp()
+/// Estimator selection: 0 = complementary filter (M1), 1 = MEKF (M2),
+/// 2 = INS (M3). Switching rebuilds the sim.
+fn make_cfg(est_kind: u8) -> SimConfig {
+    match est_kind {
+        0 => SimConfig::quad_250_mvp(),
+        1 => SimConfig::quad_250_m2(),
+        _ => SimConfig::quad_250_m3(),
     }
+}
+
+/// A 5 m square mission at 2 m altitude (NED), returning to the start.
+fn square_mission() -> Vec<Waypoint> {
+    use fsim_sim::Vec3 as V;
+    vec![
+        Waypoint::new(V::new(0.0, 0.0, -2.0), 0.0),
+        Waypoint::new(V::new(5.0, 0.0, -2.0), 0.0),
+        Waypoint::new(V::new(5.0, 5.0, -2.0), 0.0),
+        Waypoint::new(V::new(0.0, 5.0, -2.0), 0.0),
+        Waypoint::new(V::new(0.0, 0.0, -2.0), 0.0),
+    ]
 }
 
 /// Convert a simulator world position (nalgebra `f64`) to a three-d `Vec3`.
@@ -127,11 +139,15 @@ fn main() {
     let mut trail_pts: Vec<Vec3> = Vec::new();
 
     // --- simulation + UI state ---
-    let mut use_mekf = true; // default to the M2 stack
-    let cfg = make_cfg(use_mekf);
+    let mut est_kind: u8 = 2; // default to the M3 INS stack
+    let mut mission_on = true; // INS only: fly the square mission
+    let cfg = make_cfg(est_kind);
     let hover = cfg.hover_thrust();
     let mut sim = Sim::new(cfg);
     sim.set_logging(5, Some(4000)); // log at 200 Hz, keep a ~20 s window
+    if mission_on && est_kind == 2 {
+        sim.set_mission(square_mission(), GuidanceConfig::default());
+    }
 
     let mut sp_roll_deg = 0.0_f32;
     let mut sp_pitch_deg = 0.0_f32;
@@ -147,15 +163,19 @@ fn main() {
         camera.set_viewport(frame_input.viewport);
         control.handle_events(&mut camera, &mut frame_input.events);
 
-        // Apply the current setpoint, then advance physics to catch up to wall time.
-        sim.set_setpoint(Setpoint {
-            attitude: Quat::from_euler_angles(
-                sp_roll_deg.to_radians() as f64,
-                sp_pitch_deg.to_radians() as f64,
-                sp_yaw_deg.to_radians() as f64,
-            ),
-            thrust: thrust as f64,
-        });
+        // In attitude mode, drive from the sliders. In mission mode the INS
+        // position controller flies the waypoints, so don't override it.
+        let in_mission = mission_on && est_kind == 2;
+        if !in_mission {
+            sim.set_setpoint(Setpoint {
+                attitude: Quat::from_euler_angles(
+                    sp_roll_deg.to_radians() as f64,
+                    sp_pitch_deg.to_radians() as f64,
+                    sp_yaw_deg.to_radians() as f64,
+                ),
+                thrust: thrust as f64,
+            });
+        }
         if !paused {
             accumulator += frame_input.elapsed_time * 0.001 * speed as f64;
             let mut n = (accumulator / DT) as i32;
@@ -219,15 +239,19 @@ fn main() {
                     &mut thrust,
                     &mut paused,
                     &mut speed,
-                    &mut use_mekf,
+                    &mut est_kind,
+                    &mut mission_on,
                     &mut do_reset,
                 );
                 telemetry_window(ui, &sim);
             },
         );
         if do_reset {
-            sim = Sim::new(make_cfg(use_mekf));
+            sim = Sim::new(make_cfg(est_kind));
             sim.set_logging(5, Some(4000));
+            if mission_on && est_kind == 2 {
+                sim.set_mission(square_mission(), GuidanceConfig::default());
+            }
             trail_pts.clear();
             accumulator = 0.0;
             sp_roll_deg = 0.0;
@@ -263,34 +287,49 @@ fn controls_window(
     thrust: &mut f32,
     paused: &mut bool,
     speed: &mut f32,
-    use_mekf: &mut bool,
+    est_kind: &mut u8,
+    mission_on: &mut bool,
     do_reset: &mut bool,
 ) {
     egui::Window::new("Flight controls")
         .default_pos([12.0, 12.0])
         .default_width(300.0)
         .show(ui.ctx(), |ui| {
-            // Estimator selector — toggling rebuilds the sim.
+            // Estimator selector — switching rebuilds the sim.
+            ui.label("estimator");
             ui.horizontal(|ui| {
-                ui.label("estimator:");
-                if ui.radio(*use_mekf, "MEKF (M2)").clicked() && !*use_mekf {
-                    *use_mekf = true;
-                    *do_reset = true;
-                }
-                if ui.radio(!*use_mekf, "complementary (M1)").clicked() && *use_mekf {
-                    *use_mekf = false;
-                    *do_reset = true;
+                for (k, name) in [(0u8, "CF (M1)"), (1, "MEKF (M2)"), (2, "INS (M3)")] {
+                    if ui.radio(*est_kind == k, name).clicked() && *est_kind != k {
+                        *est_kind = k;
+                        *do_reset = true;
+                    }
                 }
             });
+            // The INS is the only estimator with real position — gate mission mode.
+            if *est_kind == 2 {
+                if ui.checkbox(mission_on, "fly square mission").changed() {
+                    *do_reset = true;
+                }
+            } else if *mission_on {
+                ui.label("(mission needs the INS)");
+            }
             ui.separator();
 
-            ui.label("Attitude setpoint (deg)");
-            ui.add(egui::Slider::new(roll, -35.0..=35.0).text("roll"));
-            ui.add(egui::Slider::new(pitch, -35.0..=35.0).text("pitch"));
-            ui.add(egui::Slider::new(yaw, -180.0..=180.0).text("yaw"));
-            ui.add(egui::Slider::new(thrust, 0.0..=(4.0 * hover as f32)).text("thrust (N)"));
-            if ui.button("hover thrust").clicked() {
-                *thrust = hover as f32;
+            let mission = *est_kind == 2 && *mission_on;
+            ui.add_enabled_ui(!mission, |ui| {
+                ui.label("Attitude setpoint (deg)");
+                ui.add(egui::Slider::new(roll, -35.0..=35.0).text("roll"));
+                ui.add(egui::Slider::new(pitch, -35.0..=35.0).text("pitch"));
+                ui.add(egui::Slider::new(yaw, -180.0..=180.0).text("yaw"));
+                ui.add(egui::Slider::new(thrust, 0.0..=(4.0 * hover as f32)).text("thrust (N)"));
+                if ui.button("hover thrust").clicked() {
+                    *thrust = hover as f32;
+                }
+            });
+            if mission {
+                if let Some(idx) = sim.waypoint_index() {
+                    ui.monospace(format!("mission waypoint: {idx}"));
+                }
             }
             ui.separator();
             ui.horizontal(|ui| {
@@ -323,6 +362,16 @@ fn controls_window(
                 ey.to_degrees()
             ));
             ui.monospace(format!("est err   {:6.2} deg", att_err));
+
+            // Position estimate (real only under the INS; zero for CF/MEKF).
+            ui.monospace(format!(
+                "truth pos {:6.2} {:6.2} {:6.2}",
+                truth.position.x, truth.position.y, -truth.position.z
+            ));
+            ui.monospace(format!(
+                "est   pos {:6.2} {:6.2} {:6.2}",
+                est.position.x, est.position.y, -est.position.z
+            ));
 
             // Gyro-bias estimation is the MEKF's M2 win — show true vs estimate.
             if let Some(eb) = sim.est_gyro_bias() {
@@ -401,6 +450,45 @@ fn telemetry_window(ui: &mut egui::Ui, sim: &Sim) {
                         );
                     });
             }
+            // Position estimate vs truth (M3 INS only; CF/MEKF leave it at zero).
+            if samples.iter().any(|s| s.estimate.position.norm() > 1e-6) {
+                ui.label("position truth vs est (m)");
+                let pos = |sel: &dyn Fn(&fsim_sim::TelemetrySample) -> f64| -> Vec<[f64; 2]> {
+                    samples.iter().map(|s| [s.t, sel(s)]).collect()
+                };
+                let truth_c = egui::Color32::from_rgb(90, 200, 210);
+                let est_c = egui::Color32::from_rgb(240, 140, 40);
+                Plot::new("plot_pos")
+                    .height(130.0)
+                    .legend(Legend::default())
+                    .show(ui, |p| {
+                        p.line(
+                            Line::new("N truth", PlotPoints::from(pos(&|s| s.truth.position.x)))
+                                .color(truth_c),
+                        );
+                        p.line(
+                            Line::new("N est", PlotPoints::from(pos(&|s| s.estimate.position.x)))
+                                .color(est_c),
+                        );
+                        p.line(
+                            Line::new("E truth", PlotPoints::from(pos(&|s| s.truth.position.y)))
+                                .color(truth_c),
+                        );
+                        p.line(
+                            Line::new("E est", PlotPoints::from(pos(&|s| s.estimate.position.y)))
+                                .color(est_c),
+                        );
+                        p.line(
+                            Line::new("Up truth", PlotPoints::from(pos(&|s| -s.truth.position.z)))
+                                .color(truth_c),
+                        );
+                        p.line(
+                            Line::new("Up est", PlotPoints::from(pos(&|s| -s.estimate.position.z)))
+                                .color(est_c),
+                        );
+                    });
+            }
+
             ui.label("motor thrust (N)");
             Plot::new("plot_motors")
                 .height(110.0)

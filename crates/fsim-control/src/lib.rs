@@ -17,9 +17,11 @@
 
 mod cascaded;
 mod pid;
+mod position;
 
 pub use cascaded::{CascadedConfig, CascadedPid};
 pub use pid::Pid;
+pub use position::{accel_to_setpoint, GuidanceTarget, PositionConfig, PositionController};
 
 use fsim_core::{CtrlCmd, EstState, Real, Setpoint};
 

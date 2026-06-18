@@ -9,9 +9,11 @@
 #![forbid(unsafe_code)]
 
 mod complementary;
+mod ins;
 mod mekf;
 
 pub use complementary::{ComplementaryConfig, ComplementaryFilter};
+pub use ins::{Ins, InsConfig};
 pub use mekf::{Mekf, MekfConfig};
 
 use fsim_core::{BaroMeas, EstState, GpsMeas, ImuMeas, MagMeas, Real, Vec3};

@@ -11,10 +11,12 @@
 //! [`Sim::step`] from its render loop).
 
 mod config;
+mod guidance;
 mod scheduler;
 mod telemetry;
 
 pub use config::{EstimatorKind, SimConfig};
+pub use guidance::{Guidance, GuidanceConfig, Waypoint};
 pub use scheduler::Sim;
 pub use telemetry::{Telemetry, TelemetrySample};
 

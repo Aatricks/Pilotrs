@@ -2,16 +2,34 @@
 //! them deterministically.
 
 use crate::config::{EstimatorKind, SimConfig};
+use crate::guidance::{Guidance, GuidanceConfig, Waypoint};
 use crate::telemetry::{Telemetry, TelemetrySample};
 use fsim_actuators::{Mixer, MotorModel, XQuadMixer};
-use fsim_control::{CascadedPid, Controller};
+use fsim_control::{CascadedPid, Controller, PositionConfig, PositionController};
 use fsim_core::{CtrlCmd, EstState, Real, Setpoint, State13, Tick, Vec3};
 use fsim_dynamics::{aerodynamic_wrench, Integrator, MultirotorParams, Plant, RigidBody, Rk4};
-use fsim_estimator::{ComplementaryFilter, Estimator, Mekf};
+use fsim_estimator::{ComplementaryFilter, Estimator, Ins, Mekf};
 use fsim_sensors::{Baro, Gps, Imu, Mag, Sensor, Truth};
 
-/// The complete simulator. The estimator is boxed so it can be swapped (CF or
-/// MEKF) per [`SimConfig`]; everything else is concrete.
+/// Waypoint guidance + position/velocity controller (M3 position mode).
+struct PositionMode {
+    guidance: Guidance,
+    ctrl: PositionController,
+}
+
+/// How the autopilot is commanded.
+enum ControlMode {
+    /// Attitude/thrust setpoint set externally (M1/M2 modes).
+    Attitude,
+    /// Waypoint guidance → position/velocity control (M3; needs the INS, which
+    /// is the only estimator returning real position/velocity). Boxed because
+    /// it is much larger than the `Attitude` variant.
+    Position(Box<PositionMode>),
+}
+
+/// The complete simulator. The estimator is boxed so it can be swapped (CF /
+/// MEKF / INS) per [`SimConfig`]; the control mode switches between attitude
+/// setpoints and waypoint position control.
 pub struct Sim {
     dt: Real,
     imu_period: Tick,
@@ -31,7 +49,10 @@ pub struct Sim {
     baro: Baro,
     mag: Mag,
     estimator: Box<dyn Estimator>,
+    estimator_kind: EstimatorKind,
     controller: CascadedPid,
+    control_mode: ControlMode,
+    position_cfg: PositionConfig,
     rk4: Rk4,
 
     truth: State13,
@@ -75,6 +96,7 @@ impl Sim {
         let estimator: Box<dyn Estimator> = match cfg.estimator_kind {
             EstimatorKind::Complementary => Box::new(ComplementaryFilter::new(cfg.complementary)),
             EstimatorKind::Mekf => Box::new(Mekf::new(cfg.mekf)),
+            EstimatorKind::Ins => Box::new(Ins::new(cfg.ins)),
         };
 
         Self {
@@ -96,7 +118,10 @@ impl Sim {
             baro: Baro::new(baro_cfg, cfg.seed ^ 0x2222_2222),
             mag: Mag::new(mag_cfg, cfg.seed ^ 0x3333_3333),
             estimator,
+            estimator_kind: cfg.estimator_kind,
             controller: CascadedPid::new(cfg.control),
+            control_mode: ControlMode::Attitude,
+            position_cfg: cfg.position,
             rk4: Rk4,
 
             truth: State13::at_rest(),
@@ -127,8 +152,33 @@ impl Sim {
     }
 
     /// Set the active attitude/thrust setpoint (the viewer calls this live).
+    /// Also returns the simulator to attitude-control mode.
     pub fn set_setpoint(&mut self, sp: Setpoint) {
         self.setpoint = sp;
+        self.control_mode = ControlMode::Attitude;
+    }
+
+    /// Switch to **position mode**: fly the given waypoint mission with the
+    /// outer position/velocity controller. Requires the INS estimator (the CF
+    /// and MEKF return zero position, so position control would chase the
+    /// origin) — debug-asserted.
+    pub fn set_mission(&mut self, waypoints: Vec<Waypoint>, gcfg: GuidanceConfig) {
+        debug_assert!(
+            matches!(self.estimator_kind, EstimatorKind::Ins),
+            "position mode requires the INS estimator (CF/MEKF return zero position)"
+        );
+        self.control_mode = ControlMode::Position(Box::new(PositionMode {
+            guidance: Guidance::new(waypoints, gcfg),
+            ctrl: PositionController::new(self.position_cfg),
+        }));
+    }
+
+    /// Index of the active waypoint, if flying a mission.
+    pub fn waypoint_index(&self) -> Option<usize> {
+        match &self.control_mode {
+            ControlMode::Position(pm) => Some(pm.guidance.current_index()),
+            ControlMode::Attitude => None,
+        }
     }
 
     /// Simulated time \[s\].
@@ -212,10 +262,18 @@ impl Sim {
         }
 
         // 3. Controller (at the control rate), acting on the estimate only.
+        //    In position mode the outer loop produces the attitude/thrust
+        //    setpoint from waypoint guidance; the inner cascade is the same.
         if self.tick.is_multiple_of(self.control_period) {
-            self.cmd =
-                self.controller
-                    .step(&self.estimator.state(), &self.setpoint, self.control_dt);
+            let est = self.estimator.state();
+            let setpoint = match &mut self.control_mode {
+                ControlMode::Attitude => self.setpoint,
+                ControlMode::Position(pm) => {
+                    let tgt = pm.guidance.update(est.position);
+                    pm.ctrl.step(&est, &tgt, self.control_dt)
+                }
+            };
+            self.cmd = self.controller.step(&est, &setpoint, self.control_dt);
         }
 
         // 4. Allocate to motors and apply the motor model.
@@ -415,6 +473,75 @@ mod tests {
             mekf_err < cf_err * 0.5,
             "MEKF ({mekf_err:.4}) did not clearly beat CF ({cf_err:.4})"
         );
+    }
+
+    fn square_mission() -> Vec<Waypoint> {
+        vec![
+            Waypoint::new(Vec3::new(0.0, 0.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(5.0, 0.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(5.0, 5.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(0.0, 5.0, -2.0), 0.0),
+            Waypoint::new(Vec3::new(0.0, 0.0, -2.0), 0.0),
+        ]
+    }
+
+    #[test]
+    fn ins_position_holds_at_altitude() {
+        // Single waypoint 2 m up: climb to it and hold near it (INS + position
+        // control, realistic GPS/baro noise, motor lag).
+        let mut sim = Sim::new(SimConfig::quad_250_m3());
+        sim.set_mission(
+            vec![Waypoint::new(Vec3::new(0.0, 0.0, -2.0), 0.0)],
+            GuidanceConfig::default(),
+        );
+        sim.run_headless(15000);
+        let p = sim.truth().position;
+        assert!(
+            (p - Vec3::new(0.0, 0.0, -2.0)).norm() < 0.8,
+            "did not hold position: {p:?}"
+        );
+    }
+
+    #[test]
+    fn ins_flies_square_mission_and_returns() {
+        let mut sim = Sim::new(SimConfig::quad_250_m3());
+        sim.set_mission(square_mission(), GuidanceConfig::default());
+        // Track the worst INS position error after the initial GPS-fix transient.
+        let mut max_track = 0.0_f64;
+        for k in 0..40000 {
+            sim.step();
+            if k > 2000 {
+                max_track = max_track.max((sim.truth().position - sim.estimate().position).norm());
+            }
+        }
+        // Visited every waypoint (advanced to the last).
+        assert_eq!(sim.waypoint_index(), Some(4), "mission not completed");
+        // Returned to and settled near the final waypoint.
+        let p = sim.truth().position;
+        assert!(
+            (p - Vec3::new(0.0, 0.0, -2.0)).norm() < 0.8,
+            "did not settle at final wp: {p:?}"
+        );
+        // The INS tracked truth throughout (filters the 2.5 m GPS noise).
+        assert!(max_track < 1.2, "INS position tracking error {max_track} m");
+    }
+
+    #[test]
+    fn m3_mission_is_deterministic() {
+        let fingerprint = || -> Vec<f64> {
+            let mut sim = Sim::new(SimConfig::quad_250_m3());
+            sim.set_mission(square_mission(), GuidanceConfig::default());
+            sim.set_logging(50, None);
+            sim.run_headless(20000);
+            let mut v = Vec::new();
+            for s in &sim.telemetry().samples {
+                v.extend_from_slice(s.truth.to_vector().as_slice());
+                v.extend_from_slice(s.estimate.position.as_slice());
+                v.extend_from_slice(s.estimate.velocity.as_slice());
+            }
+            v
+        };
+        assert_eq!(fingerprint(), fingerprint(), "M3 mission not deterministic");
     }
 
     #[test]

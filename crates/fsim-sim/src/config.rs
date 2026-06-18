@@ -1,9 +1,9 @@
 //! Everything needed to build a [`Sim`](crate::Sim), with presets.
 
-use fsim_control::CascadedConfig;
+use fsim_control::{CascadedConfig, PositionConfig};
 use fsim_core::{Real, DEFAULT_DT};
 use fsim_dynamics::MultirotorParams;
-use fsim_estimator::{ComplementaryConfig, MekfConfig};
+use fsim_estimator::{ComplementaryConfig, InsConfig, MekfConfig};
 use fsim_sensors::{BaroConfig, GpsConfig, ImuConfig, MagConfig};
 
 /// Which estimator the scheduler runs.
@@ -13,6 +13,9 @@ pub enum EstimatorKind {
     Complementary,
     /// Quaternion MEKF / AHRS (M2).
     Mekf,
+    /// 15-state INS (M3) — fuses GPS/baro/velocity; the only estimator that
+    /// returns real position/velocity (required for position control).
+    Ins,
 }
 
 /// Full simulator configuration. All rates are gated against the base `dt`.
@@ -42,8 +45,12 @@ pub struct SimConfig {
     pub complementary: ComplementaryConfig,
     /// MEKF tuning.
     pub mekf: MekfConfig,
-    /// Cascaded-PID gains/limits.
+    /// 15-state INS tuning.
+    pub ins: InsConfig,
+    /// Inner cascaded-PID (attitude→rate) gains/limits.
     pub control: CascadedConfig,
+    /// Outer position/velocity controller gains/limits (M3 position mode).
+    pub position: PositionConfig,
 
     /// Mixer arm length \[m\].
     pub arm_length: Real,
@@ -74,7 +81,9 @@ impl SimConfig {
             estimator_kind: EstimatorKind::Complementary,
             complementary: ComplementaryConfig::default(),
             mekf: MekfConfig::default(),
+            ins: InsConfig::default(),
             control: CascadedConfig::quad_250(),
+            position: PositionConfig::quad_250(),
             arm_length: 0.12,
             yaw_coeff: 0.016,
             max_thrust: 4.0,
@@ -94,6 +103,17 @@ impl SimConfig {
             mag: MagConfig::realistic(100.0),
             estimator_kind: EstimatorKind::Mekf,
             ..Self::quad_250_mvp()
+        }
+    }
+
+    /// M3: realistic sensors + the 15-state INS + realistic motor lag. The INS
+    /// returns real position/velocity, enabling position control + waypoint
+    /// guidance (see [`crate::Sim::set_mission`]).
+    pub fn quad_250_m3() -> Self {
+        Self {
+            estimator_kind: EstimatorKind::Ins,
+            motor_tau: 0.025, // 25 ms first-order motor lag
+            ..Self::quad_250_m2()
         }
     }
 
