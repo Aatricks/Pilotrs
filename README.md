@@ -85,7 +85,7 @@ The `core → … → control` crates form a **`no_std`-clean flight-control rin
 ## Running
 
 ```bash
-cargo test  --workspace                          # the full test suite (122 tests)
+cargo test  --workspace                          # the full test suite (154 tests)
 cargo run   -p fsim-sim --example headless        # INS flies a square mission + M2 contrast
 cargo run   -p fsim-sim --release --example montecarlo     # parallel Monte-Carlo (faster-than-real-time)
 cargo run   -p fsim-sim --release --example pid_vs_lqr      # PID vs LQR step-response + mission A/B
@@ -94,11 +94,16 @@ cargo run   -p fsim-sim --example record_replay   # record a mission, reload, re
 cargo run   -p fsim-viz --release                 # the interactive 3D viewer (sim on its own thread)
 ```
 
-In the viewer: drag to orbit; the **Flight controls** window switches the
-estimator (CF / MEKF / INS), toggles the **square mission** (INS only), sets the
-attitude setpoint / thrust, and shows true-vs-estimated attitude, gyro bias, and
-position. The **Estimate vs truth vs setpoint** window plots roll/pitch/yaw,
-motor thrusts, the gyro-bias estimate, and (under the INS) position tracking.
+In the viewer: an **airframe toggle** flies either the quad or the fixed-wing
+over a **procedural elevation terrain** (slope-shaded, ~1 km). The **Route
+planner** minimap is a top-down shaded-relief map — click to drop waypoints,
+drag to move, right-click to remove — and **Fly route** dispatches it to the
+active aircraft (the quad as an INS waypoint mission, the fixed-wing as
+vector-field line guidance). The camera follows the aircraft as it ranges over
+the map. The **Flight controls** window switches the estimator (CF / MEKF / INS),
+the inner controller (PID / LQR), and sets the attitude / cruise setpoint; the
+telemetry window plots estimate-vs-truth-vs-setpoint (quad) or airspeed /
+altitude / course (fixed-wing).
 
 > The MEKF is an *AHRS*: it assumes the accelerometer sees gravity, so a
 > sustained translating maneuver degrades its attitude. The **INS removes this**
@@ -126,9 +131,12 @@ criticalup auth set && criticalup install && criticalup run cargo build
 - **M5 ✅** LQR inner loop behind the `Controller` trait, A/B-comparable with the PID (MPC deferred).
 - **M6 ✅** fixed-wing aero plant (lift/drag/stall/surfaces) + trim + autopilot, reusing the shared EOM/RK4.
 
-The original roadmap is complete. Natural extensions: sensors + the INS in the
-fixed-wing loop, fixed-wing in the threaded engine + viewer, wind/turbulence
-(Dryden), orbit/Dubins guidance, and MPC behind the `Controller` trait.
+The original roadmap is complete. Beyond it, the viewer now flies **both
+airframes over a procedural terrain map** with an **interactive route-planner
+minimap** (the fixed-wing runs on a threaded `FwEngine` + waypoint line
+guidance). Natural extensions: sensors + the INS in the fixed-wing loop,
+wind/turbulence (Dryden), orbit/Dubins guidance, and MPC behind the
+`Controller` trait.
 
 ## License
 

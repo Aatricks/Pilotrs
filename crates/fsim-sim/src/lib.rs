@@ -14,6 +14,8 @@ mod batch;
 mod config;
 mod engine;
 mod fixedwing;
+mod fw_guidance;
+mod fwengine;
 mod guidance;
 mod recording;
 mod scheduler;
@@ -26,6 +28,8 @@ pub use batch::{
 pub use config::{ControllerKind, EstimatorKind, SimConfig};
 pub use engine::{Command, EngineClosed, LoggingCfg, RunMode, RunReport, SimEngine, Snapshot};
 pub use fixedwing::{cross_track, line_course, FwSample, FwSim, FwSimConfig};
+pub use fw_guidance::{FwGuidance, FwGuidanceConfig, TerminalAction};
+pub use fwengine::{FwCommand, FwEngine, FwLoggingCfg, FwRunMode, FwRunReport, FwSnapshot};
 // Fixed-wing types a front-end commonly needs (re-exported from their crates).
 pub use fsim_control::{FixedWingConfig, FixedWingController, FixedWingSetpoint};
 pub use fsim_dynamics::{trim, FixedWingParams, Trim};
@@ -35,4 +39,6 @@ pub use scheduler::Sim;
 pub use telemetry::{Telemetry, TelemetrySample};
 
 // Re-export the pieces a front-end (viz) commonly needs.
-pub use fsim_core::{CtrlCmd, EstState, Quat, Real, Setpoint, State13, Vec3, GRAVITY};
+pub use fsim_core::{
+    CtrlCmd, EstState, FixedWingControls, Quat, Real, Setpoint, State13, Vec3, GRAVITY,
+};

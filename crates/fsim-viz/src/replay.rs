@@ -1,11 +1,95 @@
-//! Viz data source: a live [`SimEngine`] or a recorded replay. The non-GUI
-//! logic lives here and is unit-tested; `main.rs` only calls `snapshot()` /
-//! `telemetry()` / `command()` / `tick()`.
+//! Viz data source: a live quad/fixed-wing engine or a recorded replay. The
+//! non-GUI logic lives here and is unit-tested; `main.rs` only calls
+//! `view()` / `telemetry()` / `quad_command()` / `fw_command()` / `tick()`.
+//!
+//! The render loop reads **one** [`ViewSnapshot`] per frame regardless of which
+//! airframe is flying or whether the data is live or replayed. Replay remains
+//! quad-only (recordings store the quad `TelemetrySample`).
 
-use fsim_sim::{Command, Recording, SimConfig, SimEngine, Snapshot, TelemetrySample};
+use fsim_sim::{
+    Command, FixedWingControls, FwCommand, FwEngine, FwSample, FwSimConfig, FwSnapshot, Quat, Real,
+    Recording, SimConfig, SimEngine, Snapshot, TelemetrySample, Vec3 as NaVec3,
+};
 use std::sync::Arc;
 
-/// Playback state over a loaded recording (pure index/time math).
+/// Which airframe a [`ViewSnapshot`] describes — lets the render loop pick
+/// geometry (quad body + 4 rotors vs. fixed-wing fuselage + surfaces) and the
+/// telemetry window pick its plots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AircraftKind {
+    Quad,
+    FixedWing,
+}
+
+/// The single per-frame projection the renderer consumes, regardless of
+/// airframe or whether the data is live or replayed. Pure `Copy` data in the
+/// sim's NED world frame.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewSnapshot {
+    pub t: Real,
+    pub kind: AircraftKind,
+    /// World position (NED). nalgebra `f64` — converted to three-d in `main.rs`.
+    pub position: NaVec3,
+    pub attitude: Quat,
+    /// World velocity (NED).
+    pub velocity: NaVec3,
+    pub waypoint_index: Option<usize>,
+    /// Quad motor thrusts \[N\]; zeros for fixed-wing.
+    pub motors: [Real; 4],
+    /// Fixed-wing control surfaces; `None` for quad.
+    pub surfaces: Option<FixedWingControls>,
+}
+
+impl ViewSnapshot {
+    fn from_quad(s: &Snapshot) -> Self {
+        Self {
+            t: s.t,
+            kind: AircraftKind::Quad,
+            position: s.truth.position,
+            attitude: s.truth.attitude,
+            velocity: s.truth.velocity,
+            waypoint_index: s.waypoint_index,
+            motors: s.motors,
+            surfaces: None,
+        }
+    }
+
+    fn from_fixedwing(s: &FwSnapshot) -> Self {
+        Self {
+            t: s.t,
+            kind: AircraftKind::FixedWing,
+            position: s.truth.position,
+            attitude: s.truth.attitude,
+            velocity: s.truth.velocity,
+            waypoint_index: s.waypoint_index,
+            motors: [0.0; 4],
+            surfaces: Some(s.controls),
+        }
+    }
+
+    /// Course over ground χ \[rad\] (NED), derived from the world velocity. Falls
+    /// back to the heading (yaw) when nearly stationary (quad hover) so the
+    /// minimap aircraft marker still points somewhere sensible.
+    pub fn course(&self) -> Real {
+        if self.velocity.x.hypot(self.velocity.y) < 0.1 {
+            let (_, _, yaw) = self.attitude.euler_angles();
+            yaw
+        } else {
+            self.velocity.y.atan2(self.velocity.x)
+        }
+    }
+}
+
+/// Telemetry for the plotting window, tagged by airframe. The quad path keeps
+/// the existing `TelemetrySample` plots; the fixed-wing path carries `FwSample`
+/// for an airspeed/altitude/course window.
+pub enum ViewTelemetry {
+    Quad(Arc<Vec<TelemetrySample>>),
+    FixedWing(Arc<Vec<FwSample>>),
+}
+
+/// Playback state over a loaded (quad) recording (pure index/time math).
+/// Replay remains quad-only for now (recordings store `TelemetrySample`).
 pub struct ReplayState {
     samples: Arc<Vec<TelemetrySample>>,
     t: f64,
@@ -52,12 +136,20 @@ impl ReplayState {
         (self.t0, self.t1)
     }
 
-    /// The recorded sample at the playhead (latest with `s.t <= t`).
-    pub fn current(&self) -> Option<Snapshot> {
+    /// The recorded quad sample at the playhead (latest with `s.t <= t`).
+    fn current_quad(&self) -> Option<Snapshot> {
         let count = self.samples.partition_point(|s| s.t <= self.t);
         self.samples
             .get(count.saturating_sub(1))
             .map(Snapshot::from_telemetry_sample)
+    }
+
+    fn view(&self) -> ViewSnapshot {
+        self.current_quad()
+            .map(|s| ViewSnapshot::from_quad(&s))
+            .unwrap_or_else(|| {
+                ViewSnapshot::from_quad(&Snapshot::initial(&SimConfig::quad_250_mvp()))
+            })
     }
 
     pub fn samples(&self) -> Arc<Vec<TelemetrySample>> {
@@ -65,47 +157,71 @@ impl ReplayState {
     }
 }
 
-/// Where the viewer's data comes from.
+/// Where the viewer's data comes from. Three live/replay variants; the render
+/// loop only ever sees a [`ViewSnapshot`].
 pub enum Source {
-    Live(SimEngine),
+    LiveQuad(SimEngine),
+    LiveFixedWing(FwEngine),
     Replay(ReplayState),
 }
 
 impl Source {
-    pub fn live(cfg: SimConfig) -> Self {
-        Source::Live(SimEngine::spawn_realtime(cfg))
+    /// Spawn a live quad engine.
+    pub fn live_quad(cfg: SimConfig) -> Self {
+        Source::LiveQuad(SimEngine::spawn_realtime(cfg))
+    }
+
+    /// Spawn a live fixed-wing engine.
+    pub fn live_fixedwing(cfg: FwSimConfig) -> Self {
+        Source::LiveFixedWing(FwEngine::spawn_realtime(cfg))
     }
 
     pub fn is_replay(&self) -> bool {
         matches!(self, Source::Replay(_))
     }
 
-    /// Advance time (a no-op for the live engine, which paces itself).
+    pub fn kind(&self) -> AircraftKind {
+        match self {
+            Source::LiveQuad(_) | Source::Replay(_) => AircraftKind::Quad,
+            Source::LiveFixedWing(_) => AircraftKind::FixedWing,
+        }
+    }
+
+    /// Advance time (a no-op for the live engines, which pace themselves).
     pub fn tick(&mut self, dt_frame: f64) {
         if let Source::Replay(r) = self {
             r.advance(dt_frame);
         }
     }
 
-    pub fn snapshot(&self) -> Snapshot {
+    /// The single per-frame projection the renderer consumes.
+    pub fn view(&self) -> ViewSnapshot {
         match self {
-            Source::Live(e) => e.latest(),
-            Source::Replay(r) => r
-                .current()
-                .unwrap_or_else(|| Snapshot::initial(&SimConfig::quad_250_mvp())),
+            Source::LiveQuad(e) => ViewSnapshot::from_quad(&e.latest()),
+            Source::LiveFixedWing(e) => ViewSnapshot::from_fixedwing(&e.latest()),
+            Source::Replay(r) => r.view(),
         }
     }
 
-    pub fn telemetry(&self) -> Arc<Vec<TelemetrySample>> {
+    /// Telemetry tagged by airframe for the plotting window.
+    pub fn telemetry(&self) -> ViewTelemetry {
         match self {
-            Source::Live(e) => e.telemetry(),
-            Source::Replay(r) => r.samples(),
+            Source::LiveQuad(e) => ViewTelemetry::Quad(e.telemetry()),
+            Source::LiveFixedWing(e) => ViewTelemetry::FixedWing(e.telemetry()),
+            Source::Replay(r) => ViewTelemetry::Quad(r.samples()),
         }
     }
 
-    /// Forward a command to the live engine (ignored in replay).
-    pub fn command(&self, cmd: Command) {
-        if let Source::Live(e) = self {
+    /// Forward a quad command (ignored unless this is a live quad).
+    pub fn quad_command(&self, cmd: Command) {
+        if let Source::LiveQuad(e) = self {
+            let _ = e.send(cmd);
+        }
+    }
+
+    /// Forward a fixed-wing command (ignored unless this is a live fixed-wing).
+    pub fn fw_command(&self, cmd: FwCommand) {
+        if let Source::LiveFixedWing(e) = self {
             let _ = e.send(cmd);
         }
     }
@@ -126,7 +242,7 @@ mod tests {
     #[test]
     fn replay_advances_and_stops_at_end() {
         let rec = recording();
-        let (_, t1) = (0.0, rec.duration());
+        let t1 = rec.duration();
         let mut r = ReplayState::new(rec);
         assert!(r.playing);
         for _ in 0..100000 {
@@ -148,13 +264,14 @@ mod tests {
     }
 
     #[test]
-    fn replay_current_tracks_playhead() {
+    fn replay_view_is_quad_and_tracks_playhead() {
         let mut r = ReplayState::new(recording());
         let (t0, t1) = r.range();
         r.seek(t0);
-        let s0 = r.current().unwrap();
+        let v0 = r.view();
+        assert_eq!(v0.kind, AircraftKind::Quad);
         r.seek(t1);
-        let s1 = r.current().unwrap();
-        assert!(s1.t >= s0.t, "later playhead → later sample");
+        let v1 = r.view();
+        assert!(v1.t >= v0.t, "later playhead → later sample");
     }
 }

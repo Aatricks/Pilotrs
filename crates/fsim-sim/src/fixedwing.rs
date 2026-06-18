@@ -8,12 +8,14 @@
 //! quad's M1 did before the M2/M3 estimators were added; swapping in sensors +
 //! the INS is the one-line `est` change deferred to a future milestone.
 
+use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
+use crate::guidance::Waypoint;
 use fsim_control::{FixedWingAutopilot, FixedWingConfig, FixedWingController, FixedWingSetpoint};
-use fsim_core::{EstState, FixedWingControls, Real, State13, Vec3, DEFAULT_DT};
+use fsim_core::{EstState, FixedWingControls, Real, State13, Tick, Vec3, DEFAULT_DT};
 use fsim_dynamics::{fixedwing_wrench, rigid_body_deriv, trim, FixedWingParams, Integrator, Rk4};
 
 /// One logged fixed-wing sample.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FwSample {
     pub t: Real,
     pub truth: State13,
@@ -57,6 +59,14 @@ impl FwSimConfig {
     }
 }
 
+/// How [`FwSim::step`] derives the setpoint each control gate.
+enum FwMode {
+    /// Hold the externally-set [`FixedWingSetpoint`] (the original behaviour).
+    Setpoint,
+    /// Follow a waypoint route, recomputing the setpoint from truth each gate.
+    Route(FwGuidance),
+}
+
 /// A deterministic fixed-wing simulator: autopilot → aero wrench → RK4.
 ///
 /// Flies in still air for M6: the plant's `fixedwing_wrench` supports a wind
@@ -67,7 +77,10 @@ pub struct FwSim {
     truth: State13,
     params: FixedWingParams,
     autopilot: Box<dyn FixedWingController>,
+    /// Last setpoint actually applied to the autopilot (logged each sample).
     setpoint: FixedWingSetpoint,
+    /// Setpoint-hold vs route-follow (selects how `step` builds the setpoint).
+    mode: FwMode,
     controls: FixedWingControls,
     dt: Real,
     control_period: u64,
@@ -85,6 +98,7 @@ impl FwSim {
             params: cfg.params,
             autopilot: Box::new(FixedWingAutopilot::new(cfg.autopilot)),
             setpoint: cfg.setpoint,
+            mode: FwMode::Setpoint,
             controls: FixedWingControls::zero(),
             dt: cfg.dt,
             control_period,
@@ -95,9 +109,45 @@ impl FwSim {
         }
     }
 
-    /// Update the commanded airspeed/altitude/course.
+    /// Update the commanded airspeed/altitude/course. Also switches the sim back
+    /// to single-setpoint mode, cancelling any active route.
     pub fn set_setpoint(&mut self, sp: FixedWingSetpoint) {
         self.setpoint = sp;
+        self.mode = FwMode::Setpoint;
+    }
+
+    /// Switch to route-following mode: walk `waypoints` (NED), recomputing the
+    /// setpoint from truth each control gate. The first leg runs from the
+    /// aircraft's *current* position to `waypoints[0]`. Cancels any prior route
+    /// or held setpoint. An empty route degrades to holding the start altitude.
+    pub fn set_route(&mut self, waypoints: Vec<Waypoint>, cfg: FwGuidanceConfig) {
+        let start = self.truth.position;
+        let mut g = FwGuidance::new(waypoints, start, cfg);
+        // Prime the setpoint so a log/read before the first gate is sensible.
+        self.setpoint = g.update(self.truth.position);
+        self.mode = FwMode::Route(g);
+    }
+
+    /// Active waypoint index when route-following, else `None`.
+    pub fn waypoint_index(&self) -> Option<usize> {
+        match &self.mode {
+            FwMode::Route(g) => g.current_index(),
+            FwMode::Setpoint => None,
+        }
+    }
+
+    /// True once a route has captured its final waypoint (always `false` in
+    /// setpoint mode).
+    pub fn route_complete(&self) -> bool {
+        match &self.mode {
+            FwMode::Route(g) => g.is_complete(),
+            FwMode::Setpoint => false,
+        }
+    }
+
+    /// The active commanded setpoint (route-derived when following a route).
+    pub fn setpoint(&self) -> FixedWingSetpoint {
+        self.setpoint
     }
 
     pub fn truth(&self) -> &State13 {
@@ -108,6 +158,10 @@ impl FwSim {
     }
     pub fn time(&self) -> Real {
         self.tick as Real * self.dt
+    }
+    /// Physics step counter (0 at construction).
+    pub fn tick(&self) -> Tick {
+        self.tick
     }
     /// True airspeed (still air for M6, so equal to ground speed).
     pub fn airspeed(&self) -> Real {
@@ -135,6 +189,10 @@ impl FwSim {
     /// Advance one base step (control runs on its own slower gate).
     pub fn step(&mut self) {
         if self.tick.is_multiple_of(self.control_period) {
+            // Route mode: derive the setpoint from truth (M6 perfect feedback).
+            if let FwMode::Route(g) = &mut self.mode {
+                self.setpoint = g.update(self.truth.position);
+            }
             // Truth feedback for M6 (sensors/estimator deferred).
             let est = EstState {
                 position: self.truth.position,
@@ -352,5 +410,111 @@ mod tests {
         assert_eq!(a.velocity, b.velocity);
         assert_eq!(a.attitude, b.attitude);
         assert_eq!(a.angular_rate, b.angular_rate);
+    }
+
+    use crate::fw_guidance::{FwGuidanceConfig, TerminalAction};
+
+    /// L-route guidance tuned for the Aerosonde (accept radius > turn R ≈ 110 m).
+    fn l_route_cfg() -> FwGuidanceConfig {
+        FwGuidanceConfig {
+            airspeed: 25.0,
+            accept_radius: 120.0,
+            chi_inf: 0.9,
+            k_path: 0.05,
+            terminal: TerminalAction::HoldCourse,
+        }
+    }
+
+    // T-RouteFlown: an L-route (~400 m legs at 120 m) is flown to completion —
+    // the index advances to the last waypoint, cross-track stays bounded on the
+    // straight legs, and airspeed/altitude are held.
+    #[test]
+    fn route_l_is_flown_to_completion() {
+        let mut sim = cruise_sim(); // starts at (0,0,-100), 25 m/s North
+        let route = vec![
+            Waypoint::ne_alt(400.0, 0.0, 120.0), // North leg, climb to 120 m
+            Waypoint::ne_alt(400.0, 400.0, 120.0), // turn East
+        ];
+        sim.set_route(route, l_route_cfg());
+        assert_eq!(sim.waypoint_index(), Some(0));
+
+        let mut captured_final = false;
+        let mut worst_xt_leg2 = 0.0_f64;
+        for _ in 0..90_000 {
+            sim.step();
+            // Cross-track on the second (East) leg, once active and rolled out.
+            if sim.waypoint_index() == Some(1) && sim.truth().position.y > 150.0 {
+                let e = cross_track(
+                    sim.truth().position,
+                    Vec3::new(400.0, 0.0, -120.0), // leg-2 origin = wp0
+                    core::f64::consts::FRAC_PI_2,  // due East
+                );
+                worst_xt_leg2 = worst_xt_leg2.max(e.abs());
+            }
+            if sim.route_complete() {
+                captured_final = true;
+                break;
+            }
+        }
+        assert!(captured_final, "route never reached the final waypoint");
+        assert_eq!(sim.waypoint_index(), Some(1), "index did not reach last");
+        assert!(
+            worst_xt_leg2 < 25.0,
+            "leg-2 cross-track unbounded: {worst_xt_leg2} m"
+        );
+        assert!(
+            (sim.airspeed() - 25.0).abs() < 1.5,
+            "airspeed not held: {}",
+            sim.airspeed()
+        );
+        assert!(
+            (sim.altitude() - 120.0).abs() < 6.0,
+            "altitude not held: {}",
+            sim.altitude()
+        );
+    }
+
+    // T-RouteDeterminism: the truth route path has no RNG, so two runs are
+    // bit-identical (state + the guidance index latch).
+    #[test]
+    fn route_is_deterministic() {
+        let run = || {
+            let mut sim = cruise_sim();
+            sim.set_route(
+                vec![
+                    Waypoint::ne_alt(350.0, 0.0, 130.0),
+                    Waypoint::ne_alt(350.0, 350.0, 130.0),
+                    Waypoint::ne_alt(0.0, 350.0, 130.0),
+                ],
+                l_route_cfg(),
+            );
+            sim.run_headless(60_000);
+            (*sim.truth(), sim.waypoint_index())
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a.0.position, b.0.position);
+        assert_eq!(a.0.velocity, b.0.velocity);
+        assert_eq!(a.0.attitude, b.0.attitude);
+        assert_eq!(a.0.angular_rate, b.0.angular_rate);
+        assert_eq!(a.1, b.1, "waypoint index diverged");
+    }
+
+    // T-RouteDoesNotBreakSetpoint: set_setpoint after a route cancels the route,
+    // waypoint_index goes back to None, and the held setpoint is tracked.
+    #[test]
+    fn set_setpoint_cancels_route() {
+        let mut sim = cruise_sim();
+        sim.set_route(vec![Waypoint::ne_alt(400.0, 0.0, 120.0)], l_route_cfg());
+        assert_eq!(sim.waypoint_index(), Some(0));
+        sim.step();
+        sim.set_setpoint(FixedWingSetpoint {
+            airspeed: 25.0,
+            altitude: 100.0,
+            course: 0.0,
+        });
+        assert_eq!(sim.waypoint_index(), None, "route not cancelled");
+        sim.run_headless(20_000);
+        assert!((sim.altitude() - 100.0).abs() < 5.0);
     }
 }

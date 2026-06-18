@@ -561,6 +561,40 @@ mod tests {
         assert!(max_track < 1.2, "INS position tracking error {max_track} m");
     }
 
+    // The viewer flies map-scale routes (~100 m legs) at a brisker cruise than
+    // the 5 m unit mission. Confirm the INS + position controller completes a
+    // 100 m square at 6 m/s and settles at the final waypoint — so the viewer's
+    // default "fly square mission" doesn't look broken at terrain scale.
+    #[test]
+    fn ins_flies_large_square_at_map_scale() {
+        let alt = -50.0;
+        let square = vec![
+            Waypoint::new(Vec3::new(0.0, 0.0, alt), 0.0),
+            Waypoint::new(Vec3::new(100.0, 0.0, alt), 0.0),
+            Waypoint::new(Vec3::new(100.0, 100.0, alt), 0.0),
+            Waypoint::new(Vec3::new(0.0, 100.0, alt), 0.0),
+            Waypoint::new(Vec3::new(0.0, 0.0, alt), 0.0),
+        ];
+        let gcfg = GuidanceConfig {
+            accept_radius: 5.0,
+            cruise_speed: 6.0,
+        };
+        let mut sim = Sim::new(SimConfig::quad_250_m3());
+        sim.set_mission(square, gcfg);
+        // ~100 m per leg at 6 m/s ≈ 17 s/leg × 5 legs ≈ 90 s; give 150 s of margin.
+        sim.run_headless(150_000);
+        assert_eq!(
+            sim.waypoint_index(),
+            Some(4),
+            "map-scale mission not completed"
+        );
+        let p = sim.truth().position;
+        assert!(
+            (p - Vec3::new(0.0, 0.0, alt)).norm() < 3.0,
+            "did not settle at final wp at map scale: {p:?}"
+        );
+    }
+
     #[test]
     fn m3_mission_is_deterministic() {
         let fingerprint = || -> Vec<f64> {

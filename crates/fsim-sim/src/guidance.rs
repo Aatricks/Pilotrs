@@ -17,6 +17,16 @@ impl Waypoint {
     pub fn new(position: Vec3, yaw: Real) -> Self {
         Self { position, yaw }
     }
+
+    /// Build from North / East / altitude-up (stored as NED `z = -altitude`),
+    /// with zero yaw. Convenient for routes drawn on a map (the fixed-wing
+    /// guidance ignores `yaw`; the quad holds it).
+    pub fn ne_alt(north: Real, east: Real, altitude: Real) -> Self {
+        Self {
+            position: Vec3::new(north, east, -altitude),
+            yaw: 0.0,
+        }
+    }
 }
 
 /// Guidance tuning.
