@@ -65,7 +65,7 @@ pub struct MagMeas {
 /// The estimator's best estimate of the state (what the controller acts on —
 /// it never sees truth). Mirrors [`crate::State13`]; fields the current
 /// estimator can't observe are filled best-effort (e.g. zero).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EstState {
     /// Estimated position, NED world \[m\].
     pub position: Vec3,
@@ -92,7 +92,7 @@ impl EstState {
 /// Setpoint fed to the autopilot. For the M1 attitude controller this is a
 /// desired attitude plus a collective thrust; outer loops (M3) will populate it
 /// from position/velocity/waypoint guidance.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Setpoint {
     /// Desired attitude `q_{world<-body}`.
     pub attitude: Quat,

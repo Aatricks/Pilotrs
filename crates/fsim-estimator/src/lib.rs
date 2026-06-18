@@ -24,7 +24,12 @@ use fsim_core::{BaroMeas, EstState, GpsMeas, ImuMeas, MagMeas, Real, Vec3};
 /// reference for an AHRS). The measurement updates default to no-ops so an
 /// attitude-only estimator (the complementary filter) need not implement them;
 /// the MEKF overrides the ones it uses.
-pub trait Estimator {
+///
+/// The `Send` supertrait lets a `Box<dyn Estimator>` (and therefore the whole
+/// `Sim`) move onto a worker thread for the M4 threaded engine. `Send` is a
+/// `core` marker, so this keeps the crate no_std-clean; all impls are plain
+/// `f64`/`nalgebra`/`ChaCha8` structs that are already `Send`.
+pub trait Estimator: Send {
     /// Propagate the estimate forward one IMU step.
     fn predict(&mut self, imu: &ImuMeas, dt: Real);
 

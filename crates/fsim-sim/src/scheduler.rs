@@ -186,6 +186,26 @@ impl Sim {
         self.tick as Real * self.dt
     }
 
+    /// Physics step counter (0 at construction).
+    pub fn tick(&self) -> Tick {
+        self.tick
+    }
+
+    /// Snapshot the current telemetry as a [`Recording`](crate::Recording).
+    pub fn recording(&self) -> crate::Recording {
+        crate::Recording::from_samples(self.telemetry.samples.clone())
+    }
+
+    /// Run `steps` headless and save the resulting telemetry to a recording.
+    pub fn record_headless<P: std::convert::AsRef<std::path::Path>>(
+        &mut self,
+        steps: usize,
+        path: P,
+    ) -> std::io::Result<()> {
+        self.run_headless(steps);
+        self.recording().save(path)
+    }
+
     /// Current ground truth.
     pub fn truth(&self) -> &State13 {
         &self.truth

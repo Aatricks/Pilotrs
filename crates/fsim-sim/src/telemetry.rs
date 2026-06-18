@@ -4,7 +4,7 @@
 use fsim_core::{EstState, Real, Setpoint, State13, Vec3};
 
 /// One logged instant.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TelemetrySample {
     /// Simulated time \[s\].
     pub t: Real,

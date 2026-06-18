@@ -10,13 +10,22 @@
 //! ([`Sim::run_headless`]) and the interactive viewer (which calls
 //! [`Sim::step`] from its render loop).
 
+mod batch;
 mod config;
+mod engine;
 mod guidance;
+mod recording;
 mod scheduler;
 mod telemetry;
 
+pub use batch::{
+    aggregate, run_batch, run_batch_seq, run_one, seed_sweep, square_mission, summarize_default,
+    McSummary, RunMetrics, RunSpec, RunTask,
+};
 pub use config::{EstimatorKind, SimConfig};
+pub use engine::{Command, EngineClosed, LoggingCfg, RunMode, RunReport, SimEngine, Snapshot};
 pub use guidance::{Guidance, GuidanceConfig, Waypoint};
+pub use recording::{Recording, ReplayPlayer, RECORDING_VERSION};
 pub use scheduler::Sim;
 pub use telemetry::{Telemetry, TelemetrySample};
 

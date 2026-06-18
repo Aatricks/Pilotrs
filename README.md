@@ -19,23 +19,27 @@ truth ─▶ SENSORS ──────▶ ESTIMATOR ─────────
 The controller and estimator **only** consume sensor-derived estimates — that's
 what makes the estimate-vs-truth plots meaningful.
 
-## Status: M3 (INS + waypoint guidance) complete
+## Status: M4 (threaded engine + record/replay + batch) complete
 
-The estimator is selectable across three increasingly capable filters, and the
-autopilot flies either attitude setpoints or full **waypoint missions**:
+The estimator is selectable across three increasingly capable filters, the
+autopilot flies attitude setpoints or full **waypoint missions**, and the whole
+thing runs on a **dedicated physics thread** with record/replay and batch tooling:
 
 - **M1 — complementary filter** (attitude only).
 - **M2 — 6-state quaternion MEKF**: estimates the IMU's hidden gyro bias + fuses
-  a magnetometer for heading. Beats the CF on a biased-IMU stream (≈0.95° vs
-  ≈3.1°; the CF's yaw drifts on the bias).
-- **M3 — 15-state INS** (error-state KF fusing GPS position+velocity, baro, mag):
-  uses the accelerometer as the *strapdown input*, so a sustained translating
-  maneuver no longer corrupts attitude — the AHRS limitation, **fixed**. It
-  returns real position/velocity, enabling **position/velocity control +
-  waypoint guidance**: the quad flies a 5 m square mission and returns home,
-  with the INS tracking truth to under ~1 m through 2.5 m GPS noise.
+  a magnetometer for heading (≈0.95° vs the CF's ≈3.1°; the CF's yaw drifts).
+- **M3 — 15-state INS** (GPS/baro/vel/mag fusion): the accelerometer is the
+  *strapdown input*, so sustained acceleration no longer corrupts attitude — the
+  AHRS limitation, **fixed**. Real position/velocity enables **position control
+  + waypoint guidance**; the quad flies a 5 m square mission, returning home with
+  the INS tracking truth to under ~1 m through 2.5 m GPS noise.
+- **M4 — threaded `SimEngine`**: the deterministic physics runs on its own
+  thread, publishing latest-state `Snapshot`s the viewer reads without blocking
+  it (physics/render decoupled). Plus **telemetry record/replay** (bit-exact CSV)
+  and a **faster-than-real-time parallel Monte-Carlo** harness (2.5 M fixed steps
+  in ~1 s; `run_batch == run_batch_seq` for any worker count).
 
-67 tests pass across the workspace, the core ring builds `no_std`, and runs are
+92 tests pass across the workspace, the core ring builds `no_std`, and runs are
 bit-for-bit deterministic.
 
 ## Workspace layout
@@ -52,7 +56,7 @@ The `core → … → control` crates form a **`no_std`-clean flight-control rin
 | `fsim-sensors` | `Sensor` trait + IMU / GPS / baro / magnetometer models, each with its own seeded `ChaCha8` noise + bias random-walk. |
 | `fsim-estimator` | `Estimator` trait + complementary filter, 6-state quaternion MEKF, **and a 15-state INS** (GPS/baro/mag fusion). |
 | `fsim-control` | Cascaded attitude→rate PID **+ position/velocity control** with an accel→attitude inversion. |
-| `fsim-sim` | Deterministic fixed-step scheduler, control-mode switch, waypoint `Guidance`, telemetry, headless runner. |
+| `fsim-sim` | Deterministic scheduler, control-mode switch, waypoint `Guidance`, **threaded `SimEngine`**, **record/replay**, **batch/Monte-Carlo**, telemetry. |
 | `fsim-viz` | three-d + egui_plot interactive viewer (std-only leaf). |
 
 ## Conventions (defined once in `fsim-core`)
@@ -65,9 +69,11 @@ The `core → … → control` crates form a **`no_std`-clean flight-control rin
 ## Running
 
 ```bash
-cargo test --workspace --exclude fsim-viz   # the headless test suite (67 tests)
-cargo run  -p fsim-sim --example headless    # headless: INS flies a square mission + M2 contrast
-cargo run  -p fsim-viz --release            # the interactive 3D viewer + plots
+cargo test  --workspace                          # the full test suite (92 tests)
+cargo run   -p fsim-sim --example headless        # INS flies a square mission + M2 contrast
+cargo run   -p fsim-sim --release --example montecarlo  # parallel Monte-Carlo (faster-than-real-time)
+cargo run   -p fsim-sim --example record_replay   # record a mission, reload, replay it
+cargo run   -p fsim-viz --release                 # the interactive 3D viewer (sim on its own thread)
 ```
 
 In the viewer: drag to orbit; the **Flight controls** window switches the
@@ -98,7 +104,7 @@ criticalup auth set && criticalup install && criticalup run cargo build
 - **M1 ✅** quad dynamics + RK4 + PID + complementary filter + 3D/plots.
 - **M2 ✅** realistic sensors (GPS/baro/mag) + 6-state quaternion MEKF/AHRS.
 - **M3 ✅** 15-state INS (GPS/baro/vel fusion) + position/velocity control + waypoint guidance + motor lag.
-- **M4** sim-on-its-own-thread, headless faster-than-real-time, record/replay.
+- **M4 ✅** threaded `SimEngine` (sim on its own thread) + record/replay + parallel faster-than-real-time Monte-Carlo.
 - **M5** LQR / MPC inner loops behind the `Controller` trait.
 - **M6** fixed-wing plant (lift/drag/stall) reusing the same infrastructure.
 
