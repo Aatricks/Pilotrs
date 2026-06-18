@@ -93,14 +93,18 @@ fn build_cfg(est_kind: u8, lqr: bool) -> SimConfig {
     c
 }
 
-/// A ~100 m square mission at 50 m altitude (scaled for the terrain map).
+/// A ~100 m square mission at 60 m altitude, flown inside the terrain's flat
+/// home clearing (radius `home_inner` ≈ 170 m, so the ±100 m corners stay on
+/// the level field). The clearing floor sits at `home_level` ≈ −12 m, so a
+/// 60 m mission clears it by ~72 m and a quad spawned at altitude 0 clears it
+/// by ~12 m.
 fn square_mission() -> Vec<Waypoint> {
     vec![
-        Waypoint::ne_alt(0.0, 0.0, 50.0),
-        Waypoint::ne_alt(100.0, 0.0, 50.0),
-        Waypoint::ne_alt(100.0, 100.0, 50.0),
-        Waypoint::ne_alt(0.0, 100.0, 50.0),
-        Waypoint::ne_alt(0.0, 0.0, 50.0),
+        Waypoint::ne_alt(0.0, 0.0, 60.0),
+        Waypoint::ne_alt(100.0, 0.0, 60.0),
+        Waypoint::ne_alt(100.0, 100.0, 60.0),
+        Waypoint::ne_alt(0.0, 100.0, 60.0),
+        Waypoint::ne_alt(0.0, 0.0, 60.0),
     ]
 }
 
@@ -155,6 +159,28 @@ fn opaque(context: &Context, r: u8, g: u8, b: u8) -> PhysicalMaterial {
             ..Default::default()
         },
     )
+}
+
+/// A large flat horizontal quad in the N-E plane at world z = `z_world`, with
+/// upward (`-z`, NED) normals so it lights like ground. `half` is half its side.
+/// Used for the sea backdrop.
+fn sea_mesh(half: f32, z_world: f32) -> CpuMesh {
+    let p = half;
+    CpuMesh {
+        positions: Positions::F32(vec![
+            vec3(-p, -p, z_world),
+            vec3(p, -p, z_world),
+            vec3(p, p, z_world),
+            vec3(-p, p, z_world),
+        ]),
+        // Wound so the front face points up (toward -z): the geometric face
+        // normal agrees with the per-vertex up-normals and the terrain's
+        // `winding_matches_up_normal` convention (so it stays correct even if a
+        // future change enables back-face culling).
+        indices: Indices::U32(vec![0, 2, 1, 0, 3, 2]),
+        normals: Some(vec![vec3(0.0, 0.0, -1.0); 4]),
+        ..Default::default()
+    }
 }
 
 /// Adapter so the minimap can sample the real [`Terrain`] without depending on
@@ -226,17 +252,20 @@ fn main() {
     let context = window.gl();
 
     // Camera in NED with up = world -z (altitude points up on screen). Framed
-    // for the ~1 km terrain; the orbit target follows the aircraft each frame.
+    // for the ~4.8 km terrain; the orbit target follows the aircraft each frame.
     let mut camera = Camera::new_perspective(
         window.viewport(),
-        vec3(170.0, 170.0, -150.0),
-        vec3(0.0, 0.0, -40.0),
+        vec3(220.0, 220.0, -190.0),
+        vec3(0.0, 0.0, -30.0),
         vec3(0.0, 0.0, -1.0),
         degrees(45.0),
-        0.5,
-        6000.0,
+        // Near 2 m (the orbit min distance is 3 m): keeps depth precision sane
+        // across the now-12 km far plane so distant terrain and the sea don't
+        // z-fight on the horizon.
+        2.0,
+        12000.0,
     );
-    let mut control = OrbitControl::new(vec3(0.0, 0.0, -40.0), 2.0, 2500.0);
+    let mut control = OrbitControl::new(vec3(0.0, 0.0, -30.0), 3.0, 5000.0);
 
     let ambient = AmbientLight::new(&context, 0.55, Srgba::WHITE);
     // Light travelling +z (downward in NED) so it lands on the upward (−z) faces.
@@ -245,11 +274,24 @@ fn main() {
     // Ground: the procedural elevation terrain (built once; lit per-vertex colours).
     let terrain = Terrain::new(TERRAIN_SEED);
     let ground = Gm::new(
-        Mesh::new(&context, &terrain.build_mesh(200)),
+        Mesh::new(&context, &terrain.build_mesh(320)),
         terrain.material(&context),
     );
 
-    // Quad body: a flat box, scaled up for visibility against the 1 km map.
+    // Sea: a single large lit quad at the terrain's sea level. The land pokes
+    // through it where it rises above; the deep valleys and the island rim sit
+    // below it, so it reads as water + an ocean horizon. It re-centres under the
+    // aircraft each frame (see the render loop) so the ocean always reaches the
+    // horizon and the camera never sees past the world into the void.
+    let mut sea = Gm::new(
+        Mesh::new(
+            &context,
+            &sea_mesh(terrain.half_extent * 1.6, -terrain.sea_level),
+        ),
+        opaque(&context, 38, 92, 142),
+    );
+
+    // Quad body: a flat box, scaled up for visibility against the 4.8 km map.
     let mut body = Gm::new(
         Mesh::new(&context, &CpuMesh::cube()),
         opaque(&context, 70, 130, 215),
@@ -373,6 +415,9 @@ fn main() {
 
         // --- update 3D transforms from the view ---
         let pos = to_v(&view.position);
+        // Keep the ocean plane centred under the aircraft (its z stays at sea
+        // level) so the horizon is always water, never the edge of the world.
+        sea.set_transformation(Mat4::from_translation(vec3(pos.x, pos.y, 0.0)));
         let pose = Mat4::from_translation(pos) * to_rot(&view.attitude);
         match view.kind {
             AircraftKind::Quad => {
@@ -467,7 +512,7 @@ fn main() {
         );
 
         // Follow-cam: re-aim the camera so its look-at target tracks the
-        // aircraft as it ranges over the 1 km map, preserving the current
+        // aircraft as it ranges over the 4.8 km map, preserving the current
         // camera→target offset (so the user's orbit/zoom still apply). Setting
         // only `control.target` would move the orbit pivot but never the camera.
         // up = world -z (altitude up on screen), matching construction.
@@ -573,7 +618,7 @@ fn main() {
         }
 
         // --- render scene then GUI on top ---
-        let mut objects: Vec<&dyn Object> = vec![&ground, &trail];
+        let mut objects: Vec<&dyn Object> = vec![&sea, &ground, &trail];
         match view.kind {
             AircraftKind::Quad => {
                 objects.push(&body);

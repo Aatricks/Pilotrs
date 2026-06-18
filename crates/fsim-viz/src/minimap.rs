@@ -58,7 +58,9 @@ impl Default for Route {
     fn default() -> Self {
         Self {
             wps: Vec::new(),
-            alt_up: 60.0,
+            // Above the terrain's ~60 m peaks so a fixed-wing route doesn't fly
+            // into a ridge (the sim has no terrain collision, but it looks wrong).
+            alt_up: 100.0,
             cruise: 25.0,
         }
     }
