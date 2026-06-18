@@ -22,7 +22,7 @@ pub use batch::{
     aggregate, run_batch, run_batch_seq, run_one, seed_sweep, square_mission, summarize_default,
     McSummary, RunMetrics, RunSpec, RunTask,
 };
-pub use config::{EstimatorKind, SimConfig};
+pub use config::{ControllerKind, EstimatorKind, SimConfig};
 pub use engine::{Command, EngineClosed, LoggingCfg, RunMode, RunReport, SimEngine, Snapshot};
 pub use guidance::{Guidance, GuidanceConfig, Waypoint};
 pub use recording::{Recording, ReplayPlayer, RECORDING_VERSION};

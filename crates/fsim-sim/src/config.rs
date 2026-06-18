@@ -1,6 +1,6 @@
 //! Everything needed to build a [`Sim`](crate::Sim), with presets.
 
-use fsim_control::{CascadedConfig, PositionConfig};
+use fsim_control::{CascadedConfig, LqrConfig, PositionConfig};
 use fsim_core::{Real, DEFAULT_DT};
 use fsim_dynamics::MultirotorParams;
 use fsim_estimator::{ComplementaryConfig, InsConfig, MekfConfig};
@@ -16,6 +16,15 @@ pub enum EstimatorKind {
     /// 15-state INS (M3) — fuses GPS/baro/velocity; the only estimator that
     /// returns real position/velocity (required for position control).
     Ins,
+}
+
+/// Which inner attitude/rate controller the scheduler runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerKind {
+    /// Cascaded attitude→rate PID (M1).
+    Pid,
+    /// LQR optimal state feedback (M5).
+    Lqr,
 }
 
 /// Full simulator configuration. All rates are gated against the base `dt`.
@@ -47,8 +56,12 @@ pub struct SimConfig {
     pub mekf: MekfConfig,
     /// 15-state INS tuning.
     pub ins: InsConfig,
+    /// Which inner attitude/rate controller to run.
+    pub controller_kind: ControllerKind,
     /// Inner cascaded-PID (attitude→rate) gains/limits.
     pub control: CascadedConfig,
+    /// LQR controller weights (used when `controller_kind == Lqr`).
+    pub lqr: LqrConfig,
     /// Outer position/velocity controller gains/limits (M3 position mode).
     pub position: PositionConfig,
 
@@ -82,7 +95,9 @@ impl SimConfig {
             complementary: ComplementaryConfig::default(),
             mekf: MekfConfig::default(),
             ins: InsConfig::default(),
+            controller_kind: ControllerKind::Pid,
             control: CascadedConfig::quad_250(),
+            lqr: LqrConfig::quad_250(),
             position: PositionConfig::quad_250(),
             arm_length: 0.12,
             yaw_coeff: 0.016,

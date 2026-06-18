@@ -19,8 +19,8 @@
 mod replay;
 
 use fsim_sim::{
-    Command, GuidanceConfig, Quat, Recording, Setpoint, SimConfig, Snapshot, TelemetrySample,
-    Waypoint,
+    Command, ControllerKind, GuidanceConfig, Quat, Recording, Setpoint, SimConfig, Snapshot,
+    TelemetrySample, Waypoint,
 };
 use replay::{ReplayState, Source};
 use three_d::egui;
@@ -29,6 +29,7 @@ use three_d::*;
 /// Mutable viewer state, edited by the controls window each frame.
 struct Ui {
     est_kind: u8,
+    controller_lqr: bool,
     mission_on: bool,
     roll: f32,
     pitch: f32,
@@ -54,6 +55,15 @@ fn make_cfg(est_kind: u8) -> SimConfig {
         1 => SimConfig::quad_250_m2(),
         _ => SimConfig::quad_250_m3(),
     }
+}
+
+/// Build the config for the selected estimator + inner controller (PID or LQR).
+fn build_cfg(est_kind: u8, lqr: bool) -> SimConfig {
+    let mut c = make_cfg(est_kind);
+    if lqr {
+        c.controller_kind = ControllerKind::Lqr;
+    }
+    c
 }
 
 /// A 5 m square mission at 2 m altitude (NED), returning to the start.
@@ -165,8 +175,9 @@ fn main() {
     // --- simulation + UI state ---
     let hover = make_cfg(2).hover_thrust();
     let mut ui = Ui {
-        est_kind: 2,      // default to the M3 INS stack
-        mission_on: true, // INS only: fly the square mission
+        est_kind: 2,           // default to the M3 INS stack
+        controller_lqr: false, // default to the cascaded PID
+        mission_on: true,      // INS only: fly the square mission
         roll: 0.0,
         pitch: 0.0,
         yaw: 0.0,
@@ -184,7 +195,7 @@ fn main() {
 
     // The sim runs on its own thread; the viewer reads snapshots and sends
     // commands (this is the M4 physics/render decoupling).
-    let mut source = Source::live(make_cfg(ui.est_kind));
+    let mut source = Source::live(build_cfg(ui.est_kind, ui.controller_lqr));
     if ui.mission_on && ui.est_kind == 2 {
         source.command(Command::SetMission {
             waypoints: square_mission(),
@@ -288,7 +299,7 @@ fn main() {
             source.command(Command::SaveRecording(record_path.clone()));
         }
         if ui.do_reset || ui.do_live {
-            source = Source::live(make_cfg(ui.est_kind));
+            source = Source::live(build_cfg(ui.est_kind, ui.controller_lqr));
             if ui.mission_on && ui.est_kind == 2 {
                 source.command(Command::SetMission {
                     waypoints: square_mission(),
@@ -395,6 +406,18 @@ fn controls_window(
                 } else if st.mission_on {
                     ui.label("(mission needs the INS)");
                 }
+                // Inner attitude controller: PID (M1) vs LQR (M5).
+                ui.horizontal(|ui| {
+                    ui.label("controller");
+                    if ui.radio(!st.controller_lqr, "PID").clicked() && st.controller_lqr {
+                        st.controller_lqr = false;
+                        st.do_reset = true;
+                    }
+                    if ui.radio(st.controller_lqr, "LQR").clicked() && !st.controller_lqr {
+                        st.controller_lqr = true;
+                        st.do_reset = true;
+                    }
+                });
                 ui.separator();
 
                 let mission = st.est_kind == 2 && st.mission_on;

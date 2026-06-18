@@ -1,11 +1,11 @@
 //! The fixed-step scheduler: one struct that owns every subsystem and advances
 //! them deterministically.
 
-use crate::config::{EstimatorKind, SimConfig};
+use crate::config::{ControllerKind, EstimatorKind, SimConfig};
 use crate::guidance::{Guidance, GuidanceConfig, Waypoint};
 use crate::telemetry::{Telemetry, TelemetrySample};
 use fsim_actuators::{Mixer, MotorModel, XQuadMixer};
-use fsim_control::{CascadedPid, Controller, PositionConfig, PositionController};
+use fsim_control::{CascadedPid, Controller, LqrController, PositionConfig, PositionController};
 use fsim_core::{CtrlCmd, EstState, Real, Setpoint, State13, Tick, Vec3};
 use fsim_dynamics::{aerodynamic_wrench, Integrator, MultirotorParams, Plant, RigidBody, Rk4};
 use fsim_estimator::{ComplementaryFilter, Estimator, Ins, Mekf};
@@ -50,7 +50,7 @@ pub struct Sim {
     mag: Mag,
     estimator: Box<dyn Estimator>,
     estimator_kind: EstimatorKind,
-    controller: CascadedPid,
+    controller: Box<dyn Controller>,
     control_mode: ControlMode,
     position_cfg: PositionConfig,
     rk4: Rk4,
@@ -99,6 +99,16 @@ impl Sim {
             EstimatorKind::Ins => Box::new(Ins::new(cfg.ins)),
         };
 
+        // Inner attitude/rate controller (PID or LQR).
+        let controller: Box<dyn Controller> = match cfg.controller_kind {
+            ControllerKind::Pid => Box::new(CascadedPid::new(cfg.control)),
+            ControllerKind::Lqr => {
+                let i = &cfg.params.inertia;
+                let diag = Vec3::new(i[(0, 0)], i[(1, 1)], i[(2, 2)]);
+                Box::new(LqrController::new(diag, cfg.lqr))
+            }
+        };
+
         Self {
             dt: cfg.dt,
             imu_period,
@@ -119,7 +129,7 @@ impl Sim {
             mag: Mag::new(mag_cfg, cfg.seed ^ 0x3333_3333),
             estimator,
             estimator_kind: cfg.estimator_kind,
-            controller: CascadedPid::new(cfg.control),
+            controller,
             control_mode: ControlMode::Attitude,
             position_cfg: cfg.position,
             rk4: Rk4,
@@ -293,6 +303,11 @@ impl Sim {
                     pm.ctrl.step(&est, &tgt, self.control_dt)
                 }
             };
+            // Record the *active* inner setpoint (in position mode this is the
+            // guidance-produced commanded attitude/thrust) so telemetry and the
+            // attitude plots reflect what the inner controller is actually
+            // tracking — not the stale construction-time hover.
+            self.setpoint = setpoint;
             self.cmd = self.controller.step(&est, &setpoint, self.control_dt);
         }
 
@@ -562,6 +577,23 @@ mod tests {
             v
         };
         assert_eq!(fingerprint(), fingerprint(), "M3 mission not deterministic");
+    }
+
+    #[test]
+    fn lqr_inner_controller_flies_mission() {
+        // The LQR is a drop-in for the PID: with the INS + LQR inner loop, the
+        // quad completes the square mission and settles at the final waypoint.
+        let mut cfg = SimConfig::quad_250_m3();
+        cfg.controller_kind = ControllerKind::Lqr;
+        let mut sim = Sim::new(cfg);
+        sim.set_mission(square_mission(), GuidanceConfig::default());
+        sim.run_headless(40000);
+        assert_eq!(sim.waypoint_index(), Some(4), "LQR mission not completed");
+        let p = sim.truth().position;
+        assert!(
+            (p - Vec3::new(0.0, 0.0, -2.0)).norm() < 1.0,
+            "LQR did not settle: {p:?}"
+        );
     }
 
     #[test]
