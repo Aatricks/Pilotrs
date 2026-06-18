@@ -13,6 +13,7 @@
 mod batch;
 mod config;
 mod engine;
+mod fixedwing;
 mod guidance;
 mod recording;
 mod scheduler;
@@ -24,6 +25,10 @@ pub use batch::{
 };
 pub use config::{ControllerKind, EstimatorKind, SimConfig};
 pub use engine::{Command, EngineClosed, LoggingCfg, RunMode, RunReport, SimEngine, Snapshot};
+pub use fixedwing::{cross_track, line_course, FwSample, FwSim, FwSimConfig};
+// Fixed-wing types a front-end commonly needs (re-exported from their crates).
+pub use fsim_control::{FixedWingConfig, FixedWingController, FixedWingSetpoint};
+pub use fsim_dynamics::{trim, FixedWingParams, Trim};
 pub use guidance::{Guidance, GuidanceConfig, Waypoint};
 pub use recording::{Recording, ReplayPlayer, RECORDING_VERSION};
 pub use scheduler::Sim;

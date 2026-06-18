@@ -19,12 +19,15 @@ truth ─▶ SENSORS ──────▶ ESTIMATOR ─────────
 The controller and estimator **only** consume sensor-derived estimates — that's
 what makes the estimate-vs-truth plots meaningful.
 
-## Status: M5 (LQR controller) complete
+## Status: M6 (fixed-wing) complete — the roadmap is done
 
-The estimator is selectable across three filters, the **inner controller** is
-selectable (cascaded PID or LQR), the autopilot flies attitude setpoints or full
-**waypoint missions**, and the whole thing runs on a **dedicated physics thread**
-with record/replay and batch tooling:
+A second airframe — a **fixed-wing aircraft** — now flies on the *same*
+integrator, `State13`, conventions, and rigid-body equations of motion as the
+quad. The estimator is selectable across three filters, the quad's inner
+controller is selectable (cascaded PID or LQR), the autopilot flies attitude
+setpoints or full **waypoint missions**, the whole thing runs on a **dedicated
+physics thread** with record/replay and batch tooling, and the fixed-wing adds
+an aerodynamic plant + trim + its own autopilot:
 
 - **M1 — complementary filter** (attitude only).
 - **M2 — 6-state quaternion MEKF**: estimates the IMU's hidden gyro bias + fuses
@@ -44,8 +47,15 @@ with record/replay and batch tooling:
   dynamics into three per-axis double integrators with a closed-form Riccati
   solution — no runtime solver. On a 15° step the LQR shows ~0.1% overshoot and
   ~0.38 s settling vs the PID's ~4.7% / ~0.65 s, matching it on mission tracking.
+- **M6 — fixed-wing**: a Beard & McLain aerodynamic plant (lift/drag/moment
+  coefficients, stall blend, control surfaces, propeller) for the Aerosonde UAV,
+  a Newton **trim** solver, and a decoupled successive-loop **autopilot** holding
+  airspeed / altitude / course. It reuses the quad's RK4 and the *shared*
+  `rigid_body_deriv` verbatim (the full non-diagonal `Jxz` inertia and all) —
+  only the wrench and the autopilot differ. The Aerosonde climbs, turns, and
+  changes speed under autopilot, all deterministic and headless.
 
-97 tests pass across the workspace, the core ring builds `no_std`, and runs are
+122 tests pass across the workspace, the core ring builds `no_std`, and runs are
 bit-for-bit deterministic.
 
 ## Workspace layout
@@ -56,13 +66,13 @@ The `core → … → control` crates form a **`no_std`-clean flight-control rin
 
 | Crate | Role |
 |-------|------|
-| `fsim-core` | `State13`, frame/quaternion conventions, shared message types. The contract everyone imports. |
-| `fsim-dynamics` | Newton-Euler plant (`I·ω̇ + ω×Iω = M`) + RK4 integrator with per-step quaternion renormalization. |
+| `fsim-core` | `State13`, frame/quaternion conventions, shared message types (`CtrlCmd`, `FixedWingControls`, …). The contract everyone imports. |
+| `fsim-dynamics` | Shared Newton-Euler EOM (`rigid_body_deriv`) + RK4 with per-step quaternion renormalization; the quad plant **and the M6 fixed-wing aero plant + trim**. |
 | `fsim-actuators` | X-quad control-allocation mixer + first-order motor model. |
 | `fsim-sensors` | `Sensor` trait + IMU / GPS / baro / magnetometer models, each with its own seeded `ChaCha8` noise + bias random-walk. |
 | `fsim-estimator` | `Estimator` trait + complementary filter, 6-state quaternion MEKF, **and a 15-state INS** (GPS/baro/mag fusion). |
-| `fsim-control` | `Controller` trait + cascaded attitude→rate PID, **LQR**, and position/velocity control (accel→attitude inversion). |
-| `fsim-sim` | Deterministic scheduler, control-mode switch, waypoint `Guidance`, **threaded `SimEngine`**, **record/replay**, **batch/Monte-Carlo**, telemetry. |
+| `fsim-control` | `Controller` trait + cascaded attitude→rate PID, **LQR**, position/velocity control, **and the fixed-wing autopilot**. |
+| `fsim-sim` | Deterministic scheduler, waypoint `Guidance`, **threaded `SimEngine`**, **record/replay**, **batch/Monte-Carlo**, **the fixed-wing `FwSim`**, telemetry. |
 | `fsim-viz` | three-d + egui_plot interactive viewer (std-only leaf). |
 
 ## Conventions (defined once in `fsim-core`)
@@ -75,10 +85,11 @@ The `core → … → control` crates form a **`no_std`-clean flight-control rin
 ## Running
 
 ```bash
-cargo test  --workspace                          # the full test suite (92 tests)
+cargo test  --workspace                          # the full test suite (122 tests)
 cargo run   -p fsim-sim --example headless        # INS flies a square mission + M2 contrast
-cargo run   -p fsim-sim --release --example montecarlo  # parallel Monte-Carlo (faster-than-real-time)
-cargo run   -p fsim-sim --release --example pid_vs_lqr   # PID vs LQR step-response + mission A/B
+cargo run   -p fsim-sim --release --example montecarlo     # parallel Monte-Carlo (faster-than-real-time)
+cargo run   -p fsim-sim --release --example pid_vs_lqr      # PID vs LQR step-response + mission A/B
+cargo run   -p fsim-sim --release --example fixedwing_cruise # the fixed-wing climbs, turns, changes speed
 cargo run   -p fsim-sim --example record_replay   # record a mission, reload, replay it
 cargo run   -p fsim-viz --release                 # the interactive 3D viewer (sim on its own thread)
 ```
@@ -113,7 +124,11 @@ criticalup auth set && criticalup install && criticalup run cargo build
 - **M3 ✅** 15-state INS (GPS/baro/vel fusion) + position/velocity control + waypoint guidance + motor lag.
 - **M4 ✅** threaded `SimEngine` (sim on its own thread) + record/replay + parallel faster-than-real-time Monte-Carlo.
 - **M5 ✅** LQR inner loop behind the `Controller` trait, A/B-comparable with the PID (MPC deferred).
-- **M6** fixed-wing plant (lift/drag/stall) reusing the same infrastructure.
+- **M6 ✅** fixed-wing aero plant (lift/drag/stall/surfaces) + trim + autopilot, reusing the shared EOM/RK4.
+
+The original roadmap is complete. Natural extensions: sensors + the INS in the
+fixed-wing loop, fixed-wing in the threaded engine + viewer, wind/turbulence
+(Dryden), orbit/Dubins guidance, and MPC behind the `Controller` trait.
 
 ## License
 

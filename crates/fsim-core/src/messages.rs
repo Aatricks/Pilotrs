@@ -129,3 +129,52 @@ impl CtrlCmd {
         }
     }
 }
+
+/// A fixed-wing actuator command (M6): control-surface angles \[rad\] and
+/// throttle \[0,1\]. The fixed-wing analogue of [`CtrlCmd`].
+///
+/// Sign conventions (FRD, trailing-edge-down-positive surfaces): `+elevator`
+/// pitches **nose-down** (`Cmde < 0`), `+aileron` rolls **right** (`Clda > 0`),
+/// `+rudder` yaws **left** (`Cndr < 0`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FixedWingControls {
+    /// Aileron δa \[rad\].
+    pub aileron: Real,
+    /// Elevator δe \[rad\].
+    pub elevator: Real,
+    /// Rudder δr \[rad\].
+    pub rudder: Real,
+    /// Throttle δt \[0,1\].
+    pub throttle: Real,
+}
+
+impl FixedWingControls {
+    /// All surfaces neutral, throttle off.
+    pub fn zero() -> Self {
+        Self {
+            aileron: 0.0,
+            elevator: 0.0,
+            rudder: 0.0,
+            throttle: 0.0,
+        }
+    }
+
+    /// Clamp surfaces to `±surface_max` and throttle to its range.
+    pub fn clamp(self, lim: &ControlLimits) -> Self {
+        Self {
+            aileron: self.aileron.clamp(-lim.surface_max, lim.surface_max),
+            elevator: self.elevator.clamp(-lim.surface_max, lim.surface_max),
+            rudder: self.rudder.clamp(-lim.surface_max, lim.surface_max),
+            throttle: self.throttle.clamp(lim.throttle.0, lim.throttle.1),
+        }
+    }
+}
+
+/// Actuator limits for a [`FixedWingControls`].
+#[derive(Debug, Clone, Copy)]
+pub struct ControlLimits {
+    /// Max control-surface deflection magnitude \[rad\].
+    pub surface_max: Real,
+    /// Throttle `(min, max)`.
+    pub throttle: (Real, Real),
+}

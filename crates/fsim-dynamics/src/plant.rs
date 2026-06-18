@@ -56,27 +56,41 @@ pub trait Plant {
     fn deriv(&self, state: &State13, wrench: &Wrench) -> StateDeriv;
 }
 
+/// The Newton-Euler rigid-body derivative for **any** airframe, given its net
+/// wrench and mass properties. Both the multirotor and the M6 fixed-wing plant
+/// reuse this — only their mass/inertia and how they build the [`Wrench`]
+/// differ. The inertia may be a full (non-diagonal) tensor, so a fixed-wing's
+/// `Jxz` cross term is handled by the gyroscopic `ω×Iω` and `I⁻¹` terms.
+pub fn rigid_body_deriv(
+    state: &State13,
+    wrench: &Wrench,
+    mass: Real,
+    inertia: &Matrix3<Real>,
+    inertia_inv: &Matrix3<Real>,
+) -> StateDeriv {
+    // Translation (world frame): a = F / m.
+    let d_velocity = wrench.force_world / mass;
+
+    // Attitude kinematics: q̇ = ½ q ⊗ [0, ω_body].
+    let d_attitude = attitude_kinematics(&state.attitude, &state.angular_rate);
+
+    // Rotation (body frame): ω̇ = I⁻¹ (M − ω × Iω).  The gyroscopic term
+    // ω×Iω is what couples the axes for an asymmetric body.
+    let omega = state.angular_rate;
+    let gyroscopic = omega.cross(&(inertia * omega));
+    let d_angular_rate = inertia_inv * (wrench.moment_body - gyroscopic);
+
+    StateDeriv {
+        d_position: state.velocity,
+        d_velocity,
+        d_attitude,
+        d_angular_rate,
+    }
+}
+
 impl Plant for RigidBody {
     fn deriv(&self, state: &State13, wrench: &Wrench) -> StateDeriv {
         let p = &self.params;
-
-        // Translation (world frame): a = F / m.
-        let d_velocity = wrench.force_world / p.mass;
-
-        // Attitude kinematics: q̇ = ½ q ⊗ [0, ω_body].
-        let d_attitude = attitude_kinematics(&state.attitude, &state.angular_rate);
-
-        // Rotation (body frame): ω̇ = I⁻¹ (M − ω × Iω).  The gyroscopic term
-        // ω×Iω is what couples the axes for an asymmetric body.
-        let omega = state.angular_rate;
-        let gyroscopic = omega.cross(&(p.inertia * omega));
-        let d_angular_rate = p.inertia_inv * (wrench.moment_body - gyroscopic);
-
-        StateDeriv {
-            d_position: state.velocity,
-            d_velocity,
-            d_attitude,
-            d_angular_rate,
-        }
+        rigid_body_deriv(state, wrench, p.mass, &p.inertia, &p.inertia_inv)
     }
 }

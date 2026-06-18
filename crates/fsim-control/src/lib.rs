@@ -16,11 +16,13 @@
 #![forbid(unsafe_code)]
 
 mod cascaded;
+mod fixedwing;
 mod lqr;
 mod pid;
 mod position;
 
 pub use cascaded::{CascadedConfig, CascadedPid};
+pub use fixedwing::{FixedWingAutopilot, FixedWingConfig, FixedWingController, FixedWingSetpoint};
 pub use lqr::{LqrConfig, LqrController};
 pub use pid::Pid;
 pub use position::{accel_to_setpoint, GuidanceTarget, PositionConfig, PositionController};

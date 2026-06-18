@@ -10,10 +10,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
+mod fixedwing;
 mod forces;
 mod integrator;
 mod plant;
 
+pub use fixedwing::{fixedwing_wrench, trim, FixedWingParams, Trim};
 pub use forces::aerodynamic_wrench;
 pub use integrator::{Euler, Integrator, Rk4};
-pub use plant::{MultirotorParams, Plant, RigidBody};
+pub use plant::{rigid_body_deriv, MultirotorParams, Plant, RigidBody};

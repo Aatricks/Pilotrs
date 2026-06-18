@@ -29,7 +29,10 @@
 mod messages;
 mod state;
 
-pub use messages::{BaroMeas, CtrlCmd, EstState, GpsMeas, ImuMeas, MagMeas, Setpoint, Wrench};
+pub use messages::{
+    BaroMeas, ControlLimits, CtrlCmd, EstState, FixedWingControls, GpsMeas, ImuMeas, MagMeas,
+    Setpoint, Wrench,
+};
 pub use state::{attitude_kinematics, State13, StateDeriv, STATE_DIM};
 
 use nalgebra::{UnitQuaternion, Vector3};
