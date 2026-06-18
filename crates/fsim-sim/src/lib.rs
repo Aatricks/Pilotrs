@@ -14,7 +14,7 @@ mod config;
 mod scheduler;
 mod telemetry;
 
-pub use config::SimConfig;
+pub use config::{EstimatorKind, SimConfig};
 pub use scheduler::Sim;
 pub use telemetry::{Telemetry, TelemetrySample};
 

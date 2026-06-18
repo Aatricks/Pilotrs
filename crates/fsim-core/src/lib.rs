@@ -29,7 +29,7 @@
 mod messages;
 mod state;
 
-pub use messages::{CtrlCmd, EstState, ImuMeas, Setpoint, Wrench};
+pub use messages::{BaroMeas, CtrlCmd, EstState, GpsMeas, ImuMeas, MagMeas, Setpoint, Wrench};
 pub use state::{attitude_kinematics, State13, StateDeriv, STATE_DIM};
 
 use nalgebra::{UnitQuaternion, Vector3};
@@ -58,4 +58,16 @@ pub type Tick = u64;
 #[inline]
 pub fn gravity_world() -> Vec3 {
     Vec3::new(0.0, 0.0, GRAVITY)
+}
+
+/// Reference geomagnetic field direction in the NED world frame (unit vector).
+///
+/// Mid-latitude-ish: zero declination, ~60° inclination (field dips below
+/// horizontal, pointing North and Down). The **same** reference is used by the
+/// magnetometer sensor model and the estimator's mag update, so they cannot
+/// disagree on the field — a convention bug we deliberately design out.
+#[inline]
+pub fn magnetic_field_ned() -> Vec3 {
+    // (cos 60°, 0, sin 60°) is already unit length.
+    Vec3::new(0.5, 0.0, 0.866_025_403_784_438_6)
 }

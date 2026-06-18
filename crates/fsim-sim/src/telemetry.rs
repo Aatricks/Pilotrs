@@ -1,7 +1,7 @@
 //! Recorded time series for plotting estimate-vs-truth-vs-setpoint and for
 //! golden-trajectory regression tests.
 
-use fsim_core::{EstState, Real, Setpoint, State13};
+use fsim_core::{EstState, Real, Setpoint, State13, Vec3};
 
 /// One logged instant.
 #[derive(Debug, Clone, Copy)]
@@ -16,6 +16,10 @@ pub struct TelemetrySample {
     pub setpoint: Setpoint,
     /// Actual per-motor thrust \[N\].
     pub motors: [Real; 4],
+    /// True gyro bias hidden inside the IMU \[rad/s\].
+    pub true_gyro_bias: Vec3,
+    /// Estimator's gyro-bias estimate \[rad/s\] (zero if it has none, e.g. CF).
+    pub est_gyro_bias: Vec3,
 }
 
 /// A growing log of [`TelemetrySample`]s.

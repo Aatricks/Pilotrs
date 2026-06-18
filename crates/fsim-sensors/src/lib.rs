@@ -11,11 +11,33 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
+mod baro;
+mod gps;
 mod imu;
+mod mag;
 
+pub use baro::{Baro, BaroConfig};
+pub use gps::{Gps, GpsConfig};
 pub use imu::{Imu, ImuConfig};
+pub use mag::{Mag, MagConfig};
 
 use fsim_core::{Real, State13, Vec3};
+use rand_chacha::ChaCha8Rng;
+use rand_distr::{Distribution, Normal};
+
+/// Draw a zero-mean Gaussian scalar of std `std` (0 if `std <= 0`). Shared by
+/// every sensor so they all consume RNG the same, reproducible way.
+pub(crate) fn gaussian(rng: &mut ChaCha8Rng, std: Real) -> Real {
+    if std <= 0.0 {
+        return 0.0;
+    }
+    Normal::new(0.0, std).expect("std >= 0").sample(rng)
+}
+
+/// Draw a zero-mean Gaussian 3-vector with per-axis std `std`.
+pub(crate) fn gaussian_vec3(rng: &mut ChaCha8Rng, std: Real) -> Vec3 {
+    Vec3::new(gaussian(rng, std), gaussian(rng, std), gaussian(rng, std))
+}
 
 /// Everything a sensor may need to read from the simulator's truth at one
 /// instant. The accelerometer needs world-frame acceleration (not part of

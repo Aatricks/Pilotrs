@@ -22,6 +22,16 @@ use three_d::*;
 
 const DT: f64 = 0.001;
 
+/// M2: MEKF + realistic noisy sensors (with gyro bias). M1: complementary
+/// filter + light sensors. Switching estimator rebuilds the sim.
+fn make_cfg(mekf: bool) -> SimConfig {
+    if mekf {
+        SimConfig::quad_250_m2()
+    } else {
+        SimConfig::quad_250_mvp()
+    }
+}
+
 /// Convert a simulator world position (nalgebra `f64`) to a three-d `Vec3`.
 fn to_v(p: &fsim_sim::Vec3) -> Vec3 {
     vec3(p.x as f32, p.y as f32, p.z as f32)
@@ -117,7 +127,8 @@ fn main() {
     let mut trail_pts: Vec<Vec3> = Vec::new();
 
     // --- simulation + UI state ---
-    let cfg = SimConfig::quad_250_mvp();
+    let mut use_mekf = true; // default to the M2 stack
+    let cfg = make_cfg(use_mekf);
     let hover = cfg.hover_thrust();
     let mut sim = Sim::new(cfg);
     sim.set_logging(5, Some(4000)); // log at 200 Hz, keep a ~20 s window
@@ -208,14 +219,14 @@ fn main() {
                     &mut thrust,
                     &mut paused,
                     &mut speed,
+                    &mut use_mekf,
                     &mut do_reset,
                 );
                 telemetry_window(ui, &sim);
             },
         );
         if do_reset {
-            let c = SimConfig::quad_250_mvp();
-            sim = Sim::new(c);
+            sim = Sim::new(make_cfg(use_mekf));
             sim.set_logging(5, Some(4000));
             trail_pts.clear();
             accumulator = 0.0;
@@ -252,12 +263,27 @@ fn controls_window(
     thrust: &mut f32,
     paused: &mut bool,
     speed: &mut f32,
+    use_mekf: &mut bool,
     do_reset: &mut bool,
 ) {
     egui::Window::new("Flight controls")
         .default_pos([12.0, 12.0])
-        .default_width(290.0)
+        .default_width(300.0)
         .show(ui.ctx(), |ui| {
+            // Estimator selector — toggling rebuilds the sim.
+            ui.horizontal(|ui| {
+                ui.label("estimator:");
+                if ui.radio(*use_mekf, "MEKF (M2)").clicked() && !*use_mekf {
+                    *use_mekf = true;
+                    *do_reset = true;
+                }
+                if ui.radio(!*use_mekf, "complementary (M1)").clicked() && *use_mekf {
+                    *use_mekf = false;
+                    *do_reset = true;
+                }
+            });
+            ui.separator();
+
             ui.label("Attitude setpoint (deg)");
             ui.add(egui::Slider::new(roll, -35.0..=35.0).text("roll"));
             ui.add(egui::Slider::new(pitch, -35.0..=35.0).text("pitch"));
@@ -297,6 +323,20 @@ fn controls_window(
                 ey.to_degrees()
             ));
             ui.monospace(format!("est err   {:6.2} deg", att_err));
+
+            // Gyro-bias estimation is the MEKF's M2 win — show true vs estimate.
+            if let Some(eb) = sim.est_gyro_bias() {
+                let tb = sim.true_gyro_bias();
+                ui.separator();
+                ui.monospace(format!(
+                    "gyro bias true {:+.4} {:+.4} {:+.4}",
+                    tb.x, tb.y, tb.z
+                ));
+                ui.monospace(format!(
+                    "gyro bias est  {:+.4} {:+.4} {:+.4}",
+                    eb.x, eb.y, eb.z
+                ));
+            }
         });
 }
 
@@ -372,5 +412,35 @@ fn telemetry_window(ui: &mut egui::Ui, sim: &Sim) {
                         p.line(Line::new(format!("m{m}"), PlotPoints::from(pts)));
                     }
                 });
+
+            // Gyro-bias estimate vs the hidden truth (the MEKF's M2 win). Only
+            // meaningful when the MEKF runs; the CF leaves its estimate at zero.
+            if sim.est_gyro_bias().is_some() {
+                ui.label("gyro bias est vs true (rad/s)");
+                let axis_pts = |sel: &dyn Fn(&fsim_sim::TelemetrySample) -> f64| -> Vec<[f64; 2]> {
+                    samples.iter().map(|s| [s.t, sel(s)]).collect()
+                };
+                Plot::new("plot_bias")
+                    .height(120.0)
+                    .legend(Legend::default())
+                    .show(ui, |p| {
+                        for (i, name) in ["x", "y", "z"].iter().enumerate() {
+                            p.line(
+                                Line::new(
+                                    format!("true {name}"),
+                                    PlotPoints::from(axis_pts(&|s| s.true_gyro_bias[i])),
+                                )
+                                .color(egui::Color32::from_rgb(90, 200, 210)),
+                            );
+                            p.line(
+                                Line::new(
+                                    format!("est {name}"),
+                                    PlotPoints::from(axis_pts(&|s| s.est_gyro_bias[i])),
+                                )
+                                .color(egui::Color32::from_rgb(240, 140, 40)),
+                            );
+                        }
+                    });
+            }
         });
 }

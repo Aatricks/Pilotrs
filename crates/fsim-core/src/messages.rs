@@ -34,6 +34,34 @@ pub struct ImuMeas {
     pub gyro: Vec3,
 }
 
+/// A GPS fix: NED position and velocity (low rate, larger noise than the IMU).
+#[derive(Debug, Clone, Copy)]
+pub struct GpsMeas {
+    /// Position in the NED world frame \[m\].
+    pub position: Vec3,
+    /// Velocity in the NED world frame \[m/s\].
+    pub velocity: Vec3,
+}
+
+/// A barometric altitude measurement (height above the launch plane).
+///
+/// `altitude = -z` (NED down is `+z`), plus a slowly-varying pressure bias and
+/// white noise.
+#[derive(Debug, Clone, Copy)]
+pub struct BaroMeas {
+    /// Measured altitude \[m\] (`+up`).
+    pub altitude: Real,
+}
+
+/// A 3-axis magnetometer sample: the world geomagnetic reference field rotated
+/// into the body frame, `m_body = R(q)^T · m_world` (+ noise / hard-iron bias).
+/// Provides the heading (yaw) reference the gravity vector cannot.
+#[derive(Debug, Clone, Copy)]
+pub struct MagMeas {
+    /// Field direction in the body frame (units of the reference field).
+    pub field: Vec3,
+}
+
 /// The estimator's best estimate of the state (what the controller acts on —
 /// it never sees truth). Mirrors [`crate::State13`]; fields the current
 /// estimator can't observe are filled best-effort (e.g. zero).

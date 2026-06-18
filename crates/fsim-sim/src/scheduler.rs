@@ -1,21 +1,24 @@
 //! The fixed-step scheduler: one struct that owns every subsystem and advances
 //! them deterministically.
 
-use crate::config::SimConfig;
+use crate::config::{EstimatorKind, SimConfig};
 use crate::telemetry::{Telemetry, TelemetrySample};
 use fsim_actuators::{Mixer, MotorModel, XQuadMixer};
 use fsim_control::{CascadedPid, Controller};
-use fsim_core::{CtrlCmd, EstState, Real, Setpoint, State13, Tick};
+use fsim_core::{CtrlCmd, EstState, Real, Setpoint, State13, Tick, Vec3};
 use fsim_dynamics::{aerodynamic_wrench, Integrator, MultirotorParams, Plant, RigidBody, Rk4};
-use fsim_estimator::{ComplementaryFilter, Estimator};
-use fsim_sensors::{Imu, Sensor, Truth};
+use fsim_estimator::{ComplementaryFilter, Estimator, Mekf};
+use fsim_sensors::{Baro, Gps, Imu, Mag, Sensor, Truth};
 
-/// The complete simulator. Concrete for M1 (swapping the complementary filter
-/// for the MEKF, or PID for LQR, is a localized change here).
+/// The complete simulator. The estimator is boxed so it can be swapped (CF or
+/// MEKF) per [`SimConfig`]; everything else is concrete.
 pub struct Sim {
     dt: Real,
     imu_period: Tick,
     control_period: Tick,
+    mag_period: Tick,
+    gps_period: Tick,
+    baro_period: Tick,
     imu_dt: Real,
     control_dt: Real,
 
@@ -24,7 +27,10 @@ pub struct Sim {
     mixer: XQuadMixer,
     motors: MotorModel,
     imu: Imu,
-    estimator: ComplementaryFilter,
+    gps: Gps,
+    baro: Baro,
+    mag: Mag,
+    estimator: Box<dyn Estimator>,
     controller: CascadedPid,
     rk4: Rk4,
 
@@ -43,14 +49,41 @@ impl Sim {
     /// Build a simulator from config, starting at rest and level.
     pub fn new(cfg: SimConfig) -> Self {
         let base_rate = 1.0 / cfg.dt;
-        let imu_period = (base_rate / cfg.imu_rate).round().max(1.0) as Tick;
-        let control_period = (base_rate / cfg.control_rate).round().max(1.0) as Tick;
+        let period = |rate: Real| (base_rate / rate).round().max(1.0) as Tick;
+        let imu_period = period(cfg.imu_rate);
+        let control_period = period(cfg.control_rate);
+        let mag_period = period(cfg.mag.rate_hz);
+        let gps_period = period(cfg.gps.rate_hz);
+        let baro_period = period(cfg.baro.rate_hz);
         let hover = cfg.hover_thrust();
+
+        // Snap each sensor's effective rate to the gated interval `period·dt`, so
+        // its internal bias-random-walk step (`dt = 1/rate_hz`) exactly matches
+        // how often the scheduler actually samples it — even when the requested
+        // rate doesn't evenly divide the base rate.
+        let snap = |period: Tick| base_rate / period as Real;
+        let mut imu_cfg = cfg.imu;
+        imu_cfg.rate_hz = snap(imu_period);
+        let mut gps_cfg = cfg.gps;
+        gps_cfg.rate_hz = snap(gps_period);
+        let mut baro_cfg = cfg.baro;
+        baro_cfg.rate_hz = snap(baro_period);
+        let mut mag_cfg = cfg.mag;
+        mag_cfg.rate_hz = snap(mag_period);
+
+        // Independent RNG streams per sensor, derived from the master seed.
+        let estimator: Box<dyn Estimator> = match cfg.estimator_kind {
+            EstimatorKind::Complementary => Box::new(ComplementaryFilter::new(cfg.complementary)),
+            EstimatorKind::Mekf => Box::new(Mekf::new(cfg.mekf)),
+        };
 
         Self {
             dt: cfg.dt,
             imu_period,
             control_period,
+            mag_period,
+            gps_period,
+            baro_period,
             imu_dt: imu_period as Real * cfg.dt,
             control_dt: control_period as Real * cfg.dt,
 
@@ -58,8 +91,11 @@ impl Sim {
             plant: RigidBody::new(cfg.params),
             mixer: XQuadMixer::new(cfg.arm_length, cfg.yaw_coeff, cfg.max_thrust),
             motors: MotorModel::new(cfg.motor_tau, cfg.max_thrust),
-            imu: Imu::new(cfg.imu, cfg.seed),
-            estimator: ComplementaryFilter::new(cfg.estimator),
+            imu: Imu::new(imu_cfg, cfg.seed),
+            gps: Gps::new(gps_cfg, cfg.seed ^ 0x1111_1111),
+            baro: Baro::new(baro_cfg, cfg.seed ^ 0x2222_2222),
+            mag: Mag::new(mag_cfg, cfg.seed ^ 0x3333_3333),
+            estimator,
             controller: CascadedPid::new(cfg.control),
             rk4: Rk4,
 
@@ -67,7 +103,7 @@ impl Sim {
             setpoint: Setpoint::level(hover),
             cmd: CtrlCmd {
                 thrust: hover,
-                torque: fsim_core::Vec3::zeros(),
+                torque: Vec3::zeros(),
             },
             last_motors: [0.0; 4],
             tick: 0,
@@ -120,6 +156,16 @@ impl Sim {
         self.last_motors
     }
 
+    /// Estimator's gyro-bias estimate, if it has one (the MEKF does).
+    pub fn est_gyro_bias(&self) -> Option<Vec3> {
+        self.estimator.gyro_bias_estimate()
+    }
+
+    /// The true (hidden) gyro bias inside the IMU \[rad/s\].
+    pub fn true_gyro_bias(&self) -> Vec3 {
+        self.imu.gyro_bias()
+    }
+
     /// The recorded telemetry.
     pub fn telemetry(&self) -> &Telemetry {
         &self.telemetry
@@ -137,15 +183,32 @@ impl Sim {
             .force_world
             / self.params.mass;
 
-        // 2. IMU sample + estimator predict (at the IMU rate).
+        // 2. Sensors + estimator (each gated to its own rate). The order is
+        //    predict (IMU + its internal gravity update) → mag → baro → gps;
+        //    sequential EKF updates are order-insensitive but a fixed order
+        //    keeps runs deterministic. `truth_now` is a copy so the sensor
+        //    bundle doesn't borrow `self` across the mutable estimator calls.
+        let truth_now = self.truth;
+        let bundle = Truth {
+            state: &truth_now,
+            accel_world,
+            t,
+        };
         if self.tick.is_multiple_of(self.imu_period) {
-            let bundle = Truth {
-                state: &self.truth,
-                accel_world,
-                t,
-            };
             let imu_meas = self.imu.sample(&bundle);
             self.estimator.predict(&imu_meas, self.imu_dt);
+        }
+        if self.tick.is_multiple_of(self.mag_period) {
+            let mag_meas = self.mag.sample(&bundle);
+            self.estimator.update_mag(&mag_meas);
+        }
+        if self.tick.is_multiple_of(self.baro_period) {
+            let baro_meas = self.baro.sample(&bundle);
+            self.estimator.update_baro(&baro_meas);
+        }
+        if self.tick.is_multiple_of(self.gps_period) {
+            let gps_meas = self.gps.sample(&bundle);
+            self.estimator.update_gps(&gps_meas);
         }
 
         // 3. Controller (at the control rate), acting on the estimate only.
@@ -180,6 +243,11 @@ impl Sim {
                 estimate: self.estimator.state(),
                 setpoint: self.setpoint,
                 motors: actual,
+                true_gyro_bias: self.imu.gyro_bias(),
+                est_gyro_bias: self
+                    .estimator
+                    .gyro_bias_estimate()
+                    .unwrap_or_else(Vec3::zeros),
             });
             if let Some(cap) = self.history_cap {
                 let len = self.telemetry.samples.len();
@@ -252,20 +320,33 @@ mod tests {
 
     #[test]
     fn run_is_bit_for_bit_deterministic() {
-        // Same config + same (no) guidance -> identical telemetry, twice.
-        let run = || {
-            let mut sim = Sim::new(SimConfig::quad_250_mvp());
-            let sp = Setpoint {
+        // Fingerprint the WHOLE recorded stream — truth, the estimate, and the
+        // estimator's gyro-bias — so estimator-internal nondeterminism is caught
+        // too, not just truth. Check both estimators (CF and MEKF).
+        let fingerprint = |cfg: SimConfig| -> Vec<f64> {
+            let mut sim = Sim::new(cfg);
+            sim.set_setpoint(Setpoint {
                 attitude: UnitQuaternion::from_euler_angles(0.1, -0.05, 0.2),
-                thrust: SimConfig::quad_250_mvp().hover_thrust(),
-            };
-            sim.set_setpoint(sp);
+                thrust: cfg.hover_thrust(),
+            });
             sim.run_headless(3000);
-            sim.truth().to_vector()
+            let mut v = Vec::new();
+            for s in &sim.telemetry().samples {
+                v.extend_from_slice(s.truth.to_vector().as_slice());
+                let q = s.estimate.attitude;
+                v.extend_from_slice(&[q.w, q.i, q.j, q.k]);
+                v.extend_from_slice(s.estimate.angular_rate.as_slice());
+                v.extend_from_slice(s.est_gyro_bias.as_slice());
+            }
+            v
         };
-        let a = run();
-        let b = run();
-        assert_eq!(a, b, "simulation is not deterministic");
+        for cfg in [SimConfig::quad_250_mvp(), SimConfig::quad_250_m2()] {
+            assert_eq!(
+                fingerprint(cfg),
+                fingerprint(cfg),
+                "simulation is not deterministic"
+            );
+        }
     }
 
     #[test]
@@ -286,5 +367,75 @@ mod tests {
         }
         assert!(max_err < 0.04, "estimator error grew to {max_err} rad");
         let _ = GRAVITY;
+    }
+
+    #[test]
+    fn mekf_estimates_bias_and_beats_complementary_filter() {
+        // Fair comparison: feed the SAME realistic biased-IMU + mag stream to both
+        // estimators and compare attitude error vs a level/static truth. The CF
+        // has no heading reference, so it integrates the gyro's yaw bias and
+        // drifts; the MEKF estimates the bias (using the magnetometer) and stays
+        // put. This is the headline M2 result.
+        use fsim_estimator::{ComplementaryFilter, Estimator, Mekf};
+        use fsim_sensors::{Imu, Mag, Sensor, Truth};
+
+        let cfg = SimConfig::quad_250_m2(); // realistic IMU carries a gyro bias
+        let truth = State13::at_rest();
+        let bundle = Truth {
+            state: &truth,
+            accel_world: Vec3::zeros(),
+            t: 0.0,
+        };
+
+        let mut imu = Imu::new(cfg.imu, cfg.seed);
+        let mut mag = Mag::new(cfg.mag, cfg.seed ^ 0x3333_3333);
+        let mut cf = ComplementaryFilter::new(cfg.complementary);
+        let mut mekf = Mekf::new(cfg.mekf);
+
+        for k in 0..30_000 {
+            let imu_meas = imu.sample(&bundle);
+            cf.predict(&imu_meas, 1e-3);
+            mekf.predict(&imu_meas, 1e-3);
+            if k % 10 == 0 {
+                let mag_meas = mag.sample(&bundle);
+                cf.update_mag(&mag_meas); // no-op for the CF
+                mekf.update_mag(&mag_meas);
+            }
+        }
+
+        let cf_err = truth.attitude.angle_to(&cf.state().attitude);
+        let mekf_err = truth.attitude.angle_to(&mekf.state().attitude);
+        let true_bias = imu.gyro_bias();
+        let bias_err = (mekf.gyro_bias_estimate().unwrap() - true_bias).norm();
+
+        // The realistic IMU's bias also random-walks, so the MEKF tracks a
+        // moving target; a few mrad/s residual is good tracking.
+        assert!(bias_err < 7e-3, "MEKF bias estimate off by {bias_err}");
+        assert!(
+            mekf_err < cf_err * 0.5,
+            "MEKF ({mekf_err:.4}) did not clearly beat CF ({cf_err:.4})"
+        );
+    }
+
+    #[test]
+    fn mekf_in_the_loop_holds_attitude() {
+        // The MEKF closes the loop end-to-end on the realistic-sensor config:
+        // truth stays near level AND the estimate stays close to truth throughout
+        // (the latter is what the autopilot actually flies on).
+        let mut sim = Sim::new(SimConfig::quad_250_m2());
+        let mut max_est_err = 0.0_f64;
+        for _ in 0..5000 {
+            sim.step();
+            max_est_err = max_est_err.max(sim.truth().attitude.angle_to(&sim.estimate().attitude));
+        }
+        assert!(
+            sim.truth().attitude.angle() < 0.08,
+            "attitude drifted: {}",
+            sim.truth().attitude.angle()
+        );
+        assert!(
+            max_est_err < 0.08,
+            "estimate error grew to {max_est_err} rad"
+        );
     }
 }
