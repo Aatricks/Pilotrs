@@ -415,35 +415,54 @@ pub fn short_period_modes(
     trim: &Trim,
     mut elevator_of: impl FnMut(Real, Real) -> Real,
 ) -> ShortPeriodModes {
-    // ┌─ BLANK-AND-FILL · theory 1 of 2 · the short-period linearization ───────┐
-    // Reference answer: reference/dynamics_fixedwing.rs.reference  (gitignored)
-    // Predict in DEVLOG.md BEFORE you read the reference, then implement.
-    //
-    // BUILD (the equations are in this function's doc-comment above):
-    //  1. From `trim`: airspeed `va = |velocity|`; the trim `attitude`; the trim
-    //     angle of attack `alpha_trim = atan2(w, u)` of the body velocity
-    //     `vb = attitude⁻¹ · velocity`; and the trim throttle.
-    //  2. A closure `f(alpha, q) -> (alpha_dot, q_dot)` evaluating the REAL model:
-    //       • body velocity `vb = (va·cos α, 0, va·sin α)`; a `State13` with
-    //         `velocity = attitude·vb`, the trim `attitude`, `angular_rate=(0,q,0)`.
-    //       • controls: aileron = rudder = 0, `elevator = elevator_of(alpha, q)`,
-    //         trim throttle.
-    //       • `fixedwing_wrench(.., wind = 0, gravity = 0)` ⇒ `force_world` is the
-    //         pure aero+thrust force; `f_body = attitude⁻¹ · force_world`.
-    //       • `q_dot = rigid_body_deriv(..).d_angular_rate.y`.
-    //       • `alpha_dot = q + (u·f_body.z − w·f_body.x) / (m·va²)`.
-    //  3. Forward-difference a 2×2 Jacobian A about `(alpha_trim, 0)` (step ~1e-6).
-    //  4. Eigenvalues from `λ² − tr·λ + det = 0` (tr = A00+A11, det = A00·A11 −
-    //     A01·A10): a real pair if the discriminant ≥ 0, else complex conjugates.
-    //     Return `ShortPeriodModes { eig: [(re, im); 2] }`.
-    //
-    // WHY: this is the airframe's pitch stability reduced to two numbers. The sign
-    // of the dominant real part IS the demo — `> 0` is the relaxed airframe
-    // diverging open-loop; `< 0` is the fly-by-wire holding it. Driving it through
-    // `elevator_of` makes the eigenvalues a faithful check of the real FCS.
-    // └─────────────────────────────────────────────────────────────────────────┘
     let _ = (p, trim, &mut elevator_of);
-    todo!("implement short_period_modes — see reference/dynamics_fixedwing.rs.reference")
+    let va = trim.state.velocity.norm();
+    let attitude = trim.state.attitude;
+    let vb_trim = attitude.inverse() * trim.state.velocity;
+    let alpha_trim = Float::atan2(vb_trim.z, vb_trim.x);
+    let throttle = trim.controls.throttle;
+
+    let mut f = |alpha: Real, q: Real| -> (Real, Real) {
+        let vb = Vec3::new(va * Float::cos(alpha), 0.0, va * Float::sin(alpha));
+        let state = State13 {
+            position : Vec3::zeros(),
+            velocity : attitude * vb,
+            attitude,
+            angular_rate : Vec3::new(0.0, q, 0.0),
+        };
+        let controls = FixedWingControls {
+            aileron: 0.0,
+            elevator: elevator_of(alpha, q),
+            rudder: 0.0,
+            throttle,
+        };
+        let wrench = fixedwing_wrench(&state, p, &controls, Vec3::zeros(), Vec3::zeros());
+        let f_body = attitude.inverse() * wrench.force_world;
+        let q_dot = rigid_body_deriv(&state, &wrench, p.mass, &p.inertia, &p.inertia_inv).d_angular_rate.y;
+        let alpha_dot = q + (vb.x * f_body.z - vb.z * f_body.x) / (p.mass * va * va);
+        (alpha_dot, q_dot)
+    };
+    
+    let h = 1e-6;
+    let (base_a, base_q) = f(alpha_trim, 0.0);
+    let (da_a, da_q) = f(alpha_trim + h, 0.0);
+    let (dq_a, dq_q) = f(alpha_trim, h);
+    let a00 = (da_a - base_a) / h;
+    let a01 = (dq_a - base_a) / h;
+    let a10 = (da_q - base_q) / h;
+    let a11 = (dq_q - base_q) / h;
+
+    let tr = a00 + a11;
+    let det = a00 * a11 - a01 * a10;
+    let discriminant = tr * tr - 4.0 * det;
+    let eig = if discriminant >= 0.0 {
+        let sqrt_disc = Float::sqrt(discriminant);
+        [((tr + sqrt_disc) / 2.0, 0.0), ((tr - sqrt_disc) / 2.0, 0.0)]
+    } else {
+        let sqrt_disc = Float::sqrt(-discriminant);
+        [(tr / 2.0, sqrt_disc / 2.0), (tr / 2.0, -sqrt_disc / 2.0)]
+    };
+    ShortPeriodModes { eig }
 }
 
 #[cfg(test)]
