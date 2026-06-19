@@ -40,7 +40,9 @@
 //! colour flat, with no directional shading), which would hide all the slope
 //! relief. See [`Terrain::material`].
 
-use three_d::{Context, CpuMaterial, CpuMesh, Indices, PhysicalMaterial, Positions, Srgba, Vec3};
+use three_d::{
+    Context, CpuMaterial, CpuMesh, Indices, InnerSpace, PhysicalMaterial, Positions, Srgba, Vec3,
+};
 
 /// Configuration + the deterministic height field for one terrain tile.
 ///
@@ -262,6 +264,7 @@ impl Terrain {
     /// `Tn = (1, 0, -∂h/∂n)` and `Te = (0, 1, -∂h/∂e)`; the upward normal is
     /// `Te × Tn = (-∂h/∂n, -∂h/∂e, -1)`, normalised — `z < 0` (up) in this NED
     /// layout, matching the mesh winding and the directional light.
+    #[allow(dead_code)] // legacy flat sampler — retained for tests / reference
     pub fn normal(&self, n: f32, e: f32) -> Vec3 {
         // Step ~ one grid cell; small enough to track features, large enough to
         // avoid hash quantisation noise.
@@ -285,35 +288,32 @@ impl Terrain {
     /// `three-d` converts this `Srgba` to linear automatically when it uploads
     /// the colour buffer, so pass ordinary display-space bytes (same convention
     /// as the `albedo` colours already used in `main.rs`).
+    #[allow(dead_code)] // legacy flat sampler — retained for tests / reference
     pub fn color(&self, n: f32, e: f32) -> Srgba {
-        let h = self.height(n, e);
+        // The up-facing normal has z < 0 (NED), so its up magnitude is `-z`.
+        let slope = 1.0 - (-self.normal(n, e).z).clamp(0.0, 1.0);
+        self.ramp_color(self.height(n, e), slope)
+    }
 
-        // Water first (overrides slope): blend deep→shallow by depth.
+    /// The shared elevation+slope colour ramp used by both the flat
+    /// [`color`](Self::color) and the spherical [`color_dir`](Self::color_dir):
+    /// below `sea_level` → water; otherwise sandy shore → green lowland → grass →
+    /// tan highland → grey rock → snow peak, with brown rock blended onto steep
+    /// faces (`slope` ∈ [0,1], 0 = flat). Display-space `Srgba`.
+    fn ramp_color(&self, h: f32, slope: f32) -> Srgba {
         if h <= self.sea_level {
             let depth = ((self.sea_level - h) / (self.sea_level - self.min_height()).max(1.0))
                 .clamp(0.0, 1.0);
-            let deep = rgb(16, 46, 84);
-            let shallow = rgb(50, 110, 162);
-            return mix_rgb(shallow, deep, depth);
+            return mix_rgb(rgb(50, 110, 162), rgb(16, 46, 84), depth);
         }
-
-        // Slope: 0 = flat, 1 = vertical. The up-facing normal has z < 0 (NED),
-        // so the up-component magnitude is `-z`.
-        let nz = (-self.normal(n, e).z).clamp(0.0, 1.0);
-        let slope = 1.0 - nz; // [0,1]
-
-        // Elevation fraction above sea level, normalised to the peak.
         let span = (self.max_height() - self.sea_level).max(1.0);
         let t = ((h - self.sea_level) / span).clamp(0.0, 1.0);
-
-        // Base ramp by elevation: sandy shore → green lowland → grass → tan
-        // highland → grey rock → snow peak.
-        let shore = rgb(182, 170, 120); // beach fringe just above the water
-        let lowland = rgb(70, 118, 52); // lush low ground
-        let grass = rgb(104, 140, 64); // rolling green
-        let tan = rgb(152, 138, 92); // dry highland
-        let rock_hi = rgb(122, 114, 106); // bare grey rock
-        let snow = rgb(238, 242, 247); // near-white peak
+        let shore = rgb(182, 170, 120);
+        let lowland = rgb(70, 118, 52);
+        let grass = rgb(104, 140, 64);
+        let tan = rgb(152, 138, 92);
+        let rock_hi = rgb(122, 114, 106);
+        let snow = rgb(238, 242, 247);
         let base = if t < 0.05 {
             mix_rgb(shore, lowland, t / 0.05)
         } else if t < 0.32 {
@@ -325,9 +325,6 @@ impl Terrain {
         } else {
             mix_rgb(rock_hi, snow, (t - 0.82) / 0.18)
         };
-
-        // Steep faces expose brown rock regardless of elevation. Ramp in past
-        // ~30° of slope (slope ≈ 0.18) and saturate by ~58° (slope ≈ 0.48).
         let rock = rgb(96, 80, 64);
         let rock_mix = ((slope - 0.18) / 0.30).clamp(0.0, 1.0);
         mix_rgb(base, rock, rock_mix)
@@ -361,6 +358,7 @@ impl Terrain {
     ///
     /// The returned mesh uses `Positions::F32` and `Indices::U32`, with
     /// `normals: Some(..)` and `colors: Some(..)`.
+    #[allow(dead_code)] // legacy flat mesh — superseded by sphere_mesh, kept for tests
     pub fn build_mesh(&self, cells: usize) -> CpuMesh {
         assert!(cells >= 1, "terrain needs at least one cell");
         let verts_per_side = cells + 1;
@@ -441,6 +439,248 @@ impl Terrain {
     pub fn ground_z(&self, n: f32, e: f32) -> f32 {
         -self.height(n, e)
     }
+
+    // === Spherical planet (M7) ==========================================
+    //
+    // The globe samples elevation as a function of a 3D **direction** (a point on
+    // the unit sphere) using 3D-domain fBm, so there is no lat/lon seam. The flat
+    // home clearing is keyed to the angular distance from [`home_dir`]. The same
+    // colour ramp ([`ramp_color`](Self::ramp_color)) is reused.
+
+    /// Elevation \[m\] above the sea-level surface at a unit direction `dir` on
+    /// the planet — the spherical analogue of [`height`](Self::height).
+    pub fn height_dir(&self, dir: Vec3) -> f32 {
+        let dir = dir.normalize();
+        let v = self.fbm3_01(dir);
+        let ridged = 1.0 - (2.0 * v - 1.0).abs();
+        let shaped = 0.7 * v + 0.3 * ridged;
+        let relief = -self.valley_depth + shaped * (self.amplitude + self.valley_depth);
+        // Flat home clearing keyed to arc distance from the home direction.
+        let arc = dir.dot(home_dir()).clamp(-1.0, 1.0).acos() * R_PLANET;
+        let hf = home_blend(arc, self.home_inner, self.home_outer);
+        lerp(self.home_level, relief, hf)
+    }
+
+    /// Outward surface normal (unit PCI vector) at `dir`, from central finite
+    /// differences of the displaced surface along the local tangents. Used by the
+    /// minimap hillshade and the slope term of [`color_dir`](Self::color_dir).
+    pub fn normal_dir(&self, dir: Vec3) -> Vec3 {
+        let up = dir.normalize();
+        let (north, east) = tangent_basis(up);
+        let da = 3.0 / R_PLANET; // ~3 m angular step
+        let p = self.surface_point(up);
+        let pn = self.surface_point(step_dir(up, north, da));
+        let pe = self.surface_point(step_dir(up, east, da));
+        let mut nrm = (pe - p).cross(pn - p);
+        if nrm.dot(up) < 0.0 {
+            nrm = -nrm;
+        }
+        let len = nrm.magnitude();
+        if len > 1e-9 {
+            nrm / len
+        } else {
+            up
+        }
+    }
+
+    /// Surface colour at a direction (spherical analogue of [`color`](Self::color)).
+    pub fn color_dir(&self, dir: Vec3) -> Srgba {
+        let dir = dir.normalize();
+        // slope = 1 − (outward normal · radial); 0 flat, 1 vertical.
+        let slope = 1.0 - self.normal_dir(dir).dot(dir).clamp(0.0, 1.0);
+        self.ramp_color(self.height_dir(dir), slope)
+    }
+
+    /// The displaced PCI surface point for a direction: `(R + height) · dir`.
+    fn surface_point(&self, dir: Vec3) -> Vec3 {
+        let dir = dir.normalize();
+        dir * (R_PLANET + self.height_dir(dir))
+    }
+
+    /// Bake the whole planet into one lit, coloured [`CpuMesh`]: a UV sphere of
+    /// `bands` latitude bands (× `2·bands` longitudes), each vertex displaced
+    /// radially by [`height_dir`](Self::height_dir), with per-vertex colours and
+    /// smooth normals computed from the grid neighbours. Wound so the lit faces
+    /// point outward.
+    pub fn sphere_mesh(&self, bands: usize) -> CpuMesh {
+        assert!(bands >= 2, "sphere needs at least two bands");
+        let lon_n = 2 * bands;
+        let rows = bands + 1;
+        let dir_at = |i: usize, j: usize| -> Vec3 {
+            // i: latitude 0..=bands (phi 0..π from +z pole), j: longitude 0..lon_n.
+            let phi = core::f32::consts::PI * i as f32 / bands as f32;
+            let theta = core::f32::consts::TAU * (j % lon_n) as f32 / lon_n as f32;
+            Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
+        };
+
+        let mut positions: Vec<Vec3> = Vec::with_capacity(rows * lon_n);
+        let mut dirs: Vec<Vec3> = Vec::with_capacity(rows * lon_n);
+        let mut heights: Vec<f32> = Vec::with_capacity(rows * lon_n);
+        for i in 0..rows {
+            for j in 0..lon_n {
+                let d = dir_at(i, j);
+                let h = self.height_dir(d);
+                heights.push(h);
+                dirs.push(d);
+                positions.push(d * (R_PLANET + h));
+            }
+        }
+        let idx = |i: usize, j: usize| -> usize { i * lon_n + (j % lon_n) };
+
+        // Smooth normals from grid neighbours (cross of d/dlon × d/dlat), oriented
+        // outward. Poles fall back to the radial direction.
+        let mut normals: Vec<Vec3> = Vec::with_capacity(rows * lon_n);
+        for i in 0..rows {
+            for j in 0..lon_n {
+                let up = dirs[idx(i, j)];
+                let nrm = if i == 0 || i == rows - 1 {
+                    up
+                } else {
+                    let east = positions[idx(i, j + 1)] - positions[idx(i, j + lon_n - 1)];
+                    let south = positions[idx(i + 1, j)] - positions[idx(i - 1, j)];
+                    let mut nv = south.cross(east);
+                    if nv.dot(up) < 0.0 {
+                        nv = -nv;
+                    }
+                    let l = nv.magnitude();
+                    if l > 1e-6 {
+                        nv / l
+                    } else {
+                        up
+                    }
+                };
+                normals.push(nrm);
+            }
+        }
+
+        let colors: Vec<Srgba> = (0..rows * lon_n)
+            .map(|k| {
+                let slope = 1.0 - normals[k].dot(dirs[k]).clamp(0.0, 1.0);
+                self.ramp_color(heights[k], slope)
+            })
+            .collect();
+
+        // Two triangles per quad, wound so the outward face is the front face.
+        let mut indices: Vec<u32> = Vec::with_capacity(bands * lon_n * 6);
+        for i in 0..bands {
+            for j in 0..lon_n {
+                let v00 = idx(i, j) as u32;
+                let v01 = idx(i, j + 1) as u32;
+                let v10 = idx(i + 1, j) as u32;
+                let v11 = idx(i + 1, j + 1) as u32;
+                indices.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
+            }
+        }
+
+        CpuMesh {
+            positions: Positions::F32(positions),
+            indices: Indices::U32(indices),
+            normals: Some(normals),
+            colors: Some(colors),
+            ..Default::default()
+        }
+    }
+}
+
+// --- 3D-domain noise for the sphere (seeded methods) ---------------------
+
+impl Terrain {
+    /// Integer 3D hash → `f32` in `[0, 1)`, seeded — the 3D sibling of
+    /// [`hash01`](Self::hash01) (a third coordinate folded into the same mix).
+    #[inline]
+    fn hash3_01(&self, xi: i32, yi: i32, zi: i32) -> f32 {
+        let mut h = (xi as u32)
+            .wrapping_mul(0x8DA6_B343)
+            .wrapping_add((yi as u32).wrapping_mul(0xD816_3841))
+            .wrapping_add((zi as u32).wrapping_mul(0x6D2B_79F5))
+            .wrapping_add(self.seed.wrapping_mul(0xCB1A_B31F));
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7FEB_352D);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x846C_A68B);
+        h ^= h >> 16;
+        (h >> 8) as f32 / ((1u32 << 24) as f32)
+    }
+
+    /// Trilinear value noise on the 3D lattice with the quintic fade — the 3D
+    /// sibling of [`value_noise`](Self::value_noise). Output in `[0, 1]`.
+    #[inline]
+    fn value_noise_3d(&self, x: f32, y: f32, z: f32) -> f32 {
+        let (x0, y0, z0) = (x.floor(), y.floor(), z.floor());
+        let (xi, yi, zi) = (x0 as i32, y0 as i32, z0 as i32);
+        let (ux, uy, uz) = (fade(x - x0), fade(y - y0), fade(z - z0));
+        let c = |dx: i32, dy: i32, dz: i32| self.hash3_01(xi + dx, yi + dy, zi + dz);
+        let lo = lerp(
+            lerp(c(0, 0, 0), c(1, 0, 0), ux),
+            lerp(c(0, 1, 0), c(1, 1, 0), ux),
+            uy,
+        );
+        let hi = lerp(
+            lerp(c(0, 0, 1), c(1, 0, 1), ux),
+            lerp(c(0, 1, 1), c(1, 1, 1), ux),
+            uy,
+        );
+        lerp(lo, hi, uz)
+    }
+
+    /// fBm over the 3D direction (scaled to the planet surface so the spatial
+    /// wavelength matches `base_wavelength`) — the 3D sibling of
+    /// [`fbm01`](Self::fbm01). `dir` is a unit vector. Output in `[0, 1]`.
+    #[inline]
+    fn fbm3_01(&self, dir: Vec3) -> f32 {
+        let base_freq = 1.0 / self.base_wavelength.max(1.0);
+        let p = dir * R_PLANET; // surface point in metres
+        let mut freq = base_freq;
+        let mut amp = 1.0_f32;
+        let mut sum = 0.0_f32;
+        let mut norm = 0.0_f32;
+        let (mut ox, mut oy, mut oz) = (0.0_f32, 0.0_f32, 0.0_f32);
+        for _ in 0..self.octaves.max(1) {
+            sum += amp * self.value_noise_3d(p.x * freq + ox, p.y * freq + oy, p.z * freq + oz);
+            norm += amp;
+            freq *= self.lacunarity;
+            amp *= self.gain;
+            ox += 17.0;
+            oy += 53.0;
+            oz += 89.0;
+        }
+        if norm > 0.0 {
+            sum / norm
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Planet radius in metres (f32 mirror of `fsim_core::planet::PLANET_RADIUS`).
+const R_PLANET: f32 = 6371.0;
+
+/// The home surface direction (PCI `+x`, lat/lon = 0): centre of the flat
+/// clearing and the anchor for both airframes.
+#[inline]
+fn home_dir() -> Vec3 {
+    Vec3::new(1.0, 0.0, 0.0)
+}
+
+/// An orthonormal `(north, east)` tangent basis at unit direction `up`
+/// (outward radial). `north` points toward the `+z` pole.
+#[inline]
+fn tangent_basis(up: Vec3) -> (Vec3, Vec3) {
+    let axis = Vec3::new(0.0, 0.0, 1.0);
+    let mut north = axis - up * axis.dot(up);
+    if north.magnitude() < 1e-6 {
+        let pm = Vec3::new(1.0, 0.0, 0.0);
+        north = pm - up * pm.dot(up);
+    }
+    let north = north.normalize();
+    let east = up.cross(north);
+    (north, east)
+}
+
+/// Step `da` radians from `up` toward unit tangent `t`, staying on the sphere.
+#[inline]
+fn step_dir(up: Vec3, t: Vec3, da: f32) -> Vec3 {
+    (up * da.cos() + t * da.sin()).normalize()
 }
 
 // --- free helpers --------------------------------------------------------
@@ -798,6 +1038,79 @@ mod tests {
                 e += step;
             }
             n += step;
+        }
+    }
+
+    // === Spherical sampling (M7) ========================================
+
+    /// On the globe, the home clearing is flat (== `home_level` < 0) within the
+    /// inner radius, so the quad spawned at the home surface (altitude 0) clears
+    /// the ground — the spherical analogue of `home_clearing_is_safe`.
+    #[test]
+    fn sphere_home_clearing_is_safe() {
+        let t = Terrain::default();
+        assert!(t.home_level < 0.0);
+        let pole = Vec3::new(0.0, 0.0, 1.0);
+        let (north, _e) = tangent_basis(home_dir());
+        for k in 0..40 {
+            let ang = (t.home_inner * 0.9 / R_PLANET) * (k as f32 / 39.0);
+            // Step from the home direction toward two tangents.
+            for t_dir in [north, pole.cross(home_dir()).normalize()] {
+                let d = step_dir(home_dir(), t_dir, ang);
+                let h = t.height_dir(d);
+                assert!((h - t.home_level).abs() < 1e-3, "clearing not flat: {h}");
+                assert!(h < 0.0, "ground at/above the spawn altitude");
+            }
+        }
+    }
+
+    /// `height_dir` is deterministic and stays within `[min_height, max_height]`.
+    #[test]
+    fn height_dir_deterministic_and_bounded() {
+        let a = Terrain::new(7);
+        let b = Terrain::new(7);
+        let dirs = [
+            home_dir(),
+            Vec3::new(0.0, 1.0, 0.2),
+            Vec3::new(-1.0, 2.0, 3.0),
+            Vec3::new(0.0, 0.1, 1.0),
+            Vec3::new(-2.0, -1.0, 0.5),
+        ];
+        for d in dirs {
+            let ha = a.height_dir(d);
+            assert_eq!(ha, b.height_dir(d), "not deterministic");
+            assert!(
+                ha >= a.min_height() - 1e-3 && ha <= a.max_height() + 1e-3,
+                "height_dir {ha} out of bounds"
+            );
+        }
+    }
+
+    /// The globe mesh has the right counts, in-range indices, and outward normals.
+    #[test]
+    fn sphere_mesh_is_valid() {
+        let t = Terrain::default();
+        let bands = 8usize;
+        let m = t.sphere_mesh(bands);
+        let verts = (bands + 1) * (2 * bands);
+        assert_eq!(m.positions.len(), verts);
+        match (&m.positions, &m.indices, &m.normals) {
+            (Positions::F32(p), Indices::U32(ix), Some(nr)) => {
+                assert_eq!(ix.len(), 6 * bands * (2 * bands));
+                assert!(
+                    ix.iter().all(|&i| (i as usize) < verts),
+                    "index out of range"
+                );
+                let mut checked = 0;
+                for (pos, n) in p.iter().zip(nr) {
+                    if pos.magnitude() > 1.0 {
+                        assert!(n.dot(pos.normalize()) > 0.0, "normal not outward");
+                        checked += 1;
+                    }
+                }
+                assert!(checked > 0);
+            }
+            _ => panic!("expected F32 positions, U32 indices, normals"),
         }
     }
 }

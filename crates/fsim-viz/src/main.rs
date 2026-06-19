@@ -28,6 +28,7 @@ mod minimap;
 mod replay;
 mod terrain;
 
+use fsim_sim::planet;
 use fsim_sim::{
     Command, ControllerKind, FixedWingSetpoint, FwCommand, FwGuidanceConfig, FwSample, FwSimConfig,
     GuidanceConfig, Quat, Recording, Setpoint, SimConfig, TelemetrySample, Waypoint,
@@ -40,6 +41,10 @@ use three_d::*;
 
 /// Procedural-terrain seed (fixed so the map is the same every run).
 const TERRAIN_SEED: u32 = 0x5EED_1234;
+
+/// Latitude bands of the globe mesh (× 2 longitudes). 400 → ~50 m cells near
+/// home, ~640 k triangles — built once.
+const GLOBE_BANDS: usize = 400;
 
 /// Mutable viewer state, edited by the controls window each frame.
 struct Ui {
@@ -152,6 +157,112 @@ fn to_rot(q: &Quat) -> Mat4 {
     Mat4::from(cg)
 }
 
+/// The aircraft's **PCI** render position and body→PCI rotation for a snapshot.
+/// The fixed-wing truth is already planet-centered; the quad runs in a flat
+/// local-NED frame anchored at the home surface point, so we lift it onto the
+/// globe (`pci = anchor + q_pci_from_ned · local`).
+fn render_pose(view: &ViewSnapshot) -> (Vec3, Mat4) {
+    match view.kind {
+        AircraftKind::FixedWing => (to_v(&view.position), to_rot(&view.attitude)),
+        AircraftKind::Quad => {
+            let anchor = planet::home_pci(0.0);
+            let q = planet::pci_from_ned(anchor);
+            (
+                to_v(&(anchor + q * view.position)),
+                to_rot(&(q * view.attitude)),
+            )
+        }
+    }
+}
+
+/// The aircraft's `(north, east)` offset \[m\] from home and local course \[rad\]
+/// for the minimap, computed per airframe (the quad is already local NED; the
+/// fixed-wing is PCI → projected into the home tangent frame, course taken at the
+/// aircraft's own position so it stays correct as it flies away).
+fn map_pose(view: &ViewSnapshot) -> (f32, f32, f32) {
+    match view.kind {
+        AircraftKind::Quad => (
+            view.position.x as f32,
+            view.position.y as f32,
+            view.course() as f32,
+        ),
+        AircraftKind::FixedWing => {
+            let anchor = planet::home_pci(0.0);
+            let ned = planet::ned_from_pci(anchor) * (view.position - anchor);
+            let vloc = planet::ned_from_pci(view.position) * view.velocity;
+            (ned.x as f32, ned.y as f32, vloc.y.atan2(vloc.x) as f32)
+        }
+    }
+}
+
+/// Local North/East offset (metres) from home → a unit direction on the planet
+/// (home is the prime-meridian equator point, PCI `+x`). Used to sample the
+/// globe terrain for the minimap and to convert clicked map points to waypoints.
+fn ne_to_dir(north: f32, east: f32) -> Vec3 {
+    let r = planet::PLANET_RADIUS as f32;
+    let (lat, lon) = (north / r, east / r);
+    let cl = lat.cos();
+    vec3(cl * lon.cos(), cl * lon.sin(), lat.sin())
+}
+
+/// A globe follow-camera in the aircraft's **local tangent frame** (up = radial),
+/// so it never gimbal-flips as the fixed-wing flies around the planet. Drag
+/// orbits (azimuth/elevation); scroll zooms.
+struct OrbitCam {
+    az: f32,
+    el: f32,
+    dist: f32,
+}
+
+impl OrbitCam {
+    /// Local (north, east) tangent basis at the outward radial `up`.
+    fn tangent(up: Vec3) -> (Vec3, Vec3) {
+        let axis = vec3(0.0, 0.0, 1.0);
+        let mut north = axis - up * axis.dot(up);
+        if north.magnitude() < 1e-4 {
+            let pm = vec3(1.0, 0.0, 0.0);
+            north = pm - up * pm.dot(up);
+        }
+        let north = north.normalize();
+        (north, up.cross(north))
+    }
+
+    /// Re-aim the camera to chase the aircraft at `target` (PCI), with up = local
+    /// radial. The camera sits at azimuth/elevation/distance in the local frame.
+    fn aim(&self, camera: &mut Camera, target: Vec3) {
+        let up = target.normalize();
+        let (north, east) = Self::tangent(up);
+        let (ce, se) = (self.el.cos(), self.el.sin());
+        let dir = north * (ce * self.az.cos()) + east * (ce * self.az.sin()) + up * se;
+        camera.set_view(target + dir * self.dist, target, up);
+    }
+
+    /// Apply drag (orbit) and wheel (zoom) from the frame's events.
+    fn handle(&mut self, events: &[Event]) {
+        for ev in events {
+            match ev {
+                Event::MouseMotion {
+                    button: Some(MouseButton::Left),
+                    delta,
+                    handled: false,
+                    ..
+                } => {
+                    self.az -= delta.0 * 0.006;
+                    self.el = (self.el + delta.1 * 0.006).clamp(-1.3, 1.45);
+                }
+                Event::MouseWheel {
+                    delta,
+                    handled: false,
+                    ..
+                } => {
+                    self.dist = (self.dist * (1.0 - delta.1 * 0.0015)).clamp(25.0, 9000.0);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn opaque(context: &Context, r: u8, g: u8, b: u8) -> PhysicalMaterial {
     PhysicalMaterial::new_opaque(
         context,
@@ -164,39 +275,29 @@ fn opaque(context: &Context, r: u8, g: u8, b: u8) -> PhysicalMaterial {
     )
 }
 
-/// A large flat horizontal quad in the N-E plane at world z = `z_world`, with
-/// upward (`-z`, NED) normals so it lights like ground. `half` is half its side.
-/// Used for the sea backdrop.
-fn sea_mesh(half: f32, z_world: f32) -> CpuMesh {
-    let p = half;
-    CpuMesh {
-        positions: Positions::F32(vec![
-            vec3(-p, -p, z_world),
-            vec3(p, -p, z_world),
-            vec3(p, p, z_world),
-            vec3(-p, p, z_world),
-        ]),
-        // Wound so the front face points up (toward -z): the geometric face
-        // normal agrees with the per-vertex up-normals and the terrain's
-        // `winding_matches_up_normal` convention (so it stays correct even if a
-        // future change enables back-face culling).
-        indices: Indices::U32(vec![0, 2, 1, 0, 3, 2]),
-        normals: Some(vec![vec3(0.0, 0.0, -1.0); 4]),
-        ..Default::default()
-    }
-}
-
 /// Adapter so the minimap can sample the real [`Terrain`] without depending on
-/// its concrete type.
+/// its concrete type. The minimap is a *local tangent map* at home, so a North/
+/// East offset maps to a direction on the globe ([`ne_to_dir`]) and we sample the
+/// spherical terrain there.
 impl TerrainLike for Terrain {
     fn height(&self, north: f32, east: f32) -> f32 {
-        Terrain::height(self, north, east)
+        self.height_dir(ne_to_dir(north, east))
     }
     fn normal(&self, north: f32, east: f32) -> Vec3 {
-        Terrain::normal(self, north, east)
+        // Local NED up-normal (z < 0) from central differences of the globe
+        // height in the home tangent map — exactly what the hillshade expects.
+        let d = 4.0;
+        let dhdn = (self.height_dir(ne_to_dir(north + d, east))
+            - self.height_dir(ne_to_dir(north - d, east)))
+            / (2.0 * d);
+        let dhde = (self.height_dir(ne_to_dir(north, east + d))
+            - self.height_dir(ne_to_dir(north, east - d)))
+            / (2.0 * d);
+        let nrm = vec3(-dhdn, -dhde, -1.0);
+        nrm / nrm.magnitude()
     }
     fn color(&self, north: f32, east: f32) -> (u8, u8, u8) {
-        let c = Terrain::color(self, north, east);
+        let c = self.color_dir(ne_to_dir(north, east));
         (c.r, c.g, c.b)
     }
 }
@@ -254,45 +355,47 @@ fn main() {
     .unwrap();
     let context = window.gl();
 
-    // Camera in NED with up = world -z (altitude points up on screen). Framed
-    // for the ~4.8 km terrain; the orbit target follows the aircraft each frame.
+    // Globe follow-camera: up = the local radial at the aircraft, so it never
+    // gimbal-flips as the fixed-wing flies around the planet (see OrbitCam). The
+    // far plane clears the whole ~12.7 km planet so the curved horizon shows.
+    let r_planet = planet::PLANET_RADIUS as f32;
     let mut camera = Camera::new_perspective(
         window.viewport(),
-        vec3(350.0, 350.0, -360.0),
-        vec3(0.0, 0.0, -20.0),
-        vec3(0.0, 0.0, -1.0),
+        vec3(r_planet + 1200.0, 0.0, 700.0),
+        vec3(r_planet, 0.0, 0.0),
+        vec3(1.0, 0.0, 0.0),
         degrees(45.0),
-        // Near 2 m (the orbit min distance is 3 m): keeps depth precision sane
-        // across the far plane so distant mountains and the sea don't z-fight on
-        // the horizon.
-        2.0,
-        14000.0,
+        5.0,
+        20000.0,
     );
-    let mut control = OrbitControl::new(vec3(0.0, 0.0, -20.0), 3.0, 6000.0);
+    let mut orbit = OrbitCam {
+        az: std::f32::consts::PI, // behind the aircraft, looking North
+        el: 0.5,                  // ~29° above the local horizon
+        dist: 900.0,
+    };
 
-    let ambient = AmbientLight::new(&context, 0.55, Srgba::WHITE);
-    // Light travelling +z (downward in NED) so it lands on the upward (−z) faces.
-    let directional = DirectionalLight::new(&context, 2.2, Srgba::WHITE, vec3(0.4, 0.3, 1.0));
+    let ambient = AmbientLight::new(&context, 0.5, Srgba::WHITE);
+    // Sun: lights the home hemisphere (+x) from the upper side. On the globe a
+    // surface's outward normal is its radial; this direction (L = −dir) has a
+    // positive component along the home radial so the airfield is lit.
+    let directional = DirectionalLight::new(&context, 2.4, Srgba::WHITE, vec3(-0.7, -0.35, -0.55));
 
-    // Ground: the procedural elevation terrain (built once; lit per-vertex colours).
+    // The planet: the procedural terrain baked onto a globe (built once; lit
+    // per-vertex colours), centred at the PCI origin.
     let terrain = Terrain::new(TERRAIN_SEED);
     let ground = Gm::new(
-        Mesh::new(&context, &terrain.build_mesh(320)),
+        Mesh::new(&context, &terrain.sphere_mesh(GLOBE_BANDS)),
         terrain.material(&context),
     );
 
-    // Sea: a single large lit quad at the terrain's sea level. The land pokes
-    // through it where it rises above; the deep valleys and the island rim sit
-    // below it, so it reads as water + an ocean horizon. It re-centres under the
-    // aircraft each frame (see the render loop) so the ocean always reaches the
-    // horizon and the camera never sees past the world into the void.
+    // Sea: a smooth sphere at sea level. Land pokes through where the terrain
+    // rises above it; deep valleys sit below it and read as water/ocean.
+    let sea_radius = r_planet + terrain.sea_level;
     let mut sea = Gm::new(
-        Mesh::new(
-            &context,
-            &sea_mesh(terrain.half_extent * 1.6, -terrain.sea_level),
-        ),
-        opaque(&context, 38, 92, 142),
+        Mesh::new(&context, &CpuMesh::sphere(48)),
+        opaque(&context, 30, 78, 130),
     );
+    sea.set_transformation(Mat4::from_scale(sea_radius));
 
     // Quad body: a flat box, scaled up for visibility against the 4.8 km map.
     let mut body = Gm::new(
@@ -416,12 +519,11 @@ fn main() {
             }
         }
 
-        // --- update 3D transforms from the view ---
-        let pos = to_v(&view.position);
-        // Keep the ocean plane centred under the aircraft (its z stays at sea
-        // level) so the horizon is always water, never the edge of the world.
-        sea.set_transformation(Mat4::from_translation(vec3(pos.x, pos.y, 0.0)));
-        let pose = Mat4::from_translation(pos) * to_rot(&view.attitude);
+        // --- update 3D transforms from the view (PCI render pose) ---
+        let (pos, rot) = render_pose(&view);
+        let pose = Mat4::from_translation(pos) * rot;
+        // Aircraft pose projected into the home tangent map (for the minimap).
+        let (map_n, map_e, map_course) = map_pose(&view);
         match view.kind {
             AircraftKind::Quad => {
                 body.set_transformation(pose * Mat4::from_nonuniform_scale(3.5, 3.5, 0.7));
@@ -449,7 +551,7 @@ fn main() {
             if trail_pts.len() > 1500 {
                 trail_pts.remove(0);
             }
-            map_trail.push((view.position.x as f32, view.position.y as f32));
+            map_trail.push((map_n, map_e));
             if map_trail.len() > 2000 {
                 map_trail.remove(0);
             }
@@ -497,9 +599,9 @@ fn main() {
                     ViewTelemetry::FixedWing(s) => fw_telemetry_window(egui_ui, s),
                 }
                 let mview = MinimapView {
-                    pos_north: view.position.x as f32,
-                    pos_east: view.position.y as f32,
-                    course: view.course() as f32,
+                    pos_north: map_n,
+                    pos_east: map_e,
+                    course: map_course,
                     active_wp: view.waypoint_index,
                     trail: &map_trail,
                 };
@@ -514,19 +616,14 @@ fn main() {
             },
         );
 
-        // Follow-cam: re-aim the camera so its look-at target tracks the
-        // aircraft as it ranges over the 4.8 km map, preserving the current
-        // camera→target offset (so the user's orbit/zoom still apply). Setting
-        // only `control.target` would move the orbit pivot but never the camera.
-        // up = world -z (altitude up on screen), matching construction.
-        let cam_offset = camera.position() - camera.target();
-        camera.set_view(pos + cam_offset, pos, vec3(0.0, 0.0, -1.0));
-        control.target = pos;
-        // Camera control second, only when egui isn't claiming the pointer, so
-        // dragging on the minimap never rotates the camera under it.
+        // Globe follow-cam: orbit the aircraft in its local tangent frame (up =
+        // radial) so the camera never gimbal-flips as the fixed-wing circles the
+        // planet. Drag orbits / scroll zooms — but only when egui isn't using the
+        // pointer, so dragging on the minimap never moves the camera.
         if !egui_using {
-            control.handle_events(&mut camera, &mut frame_input.events);
+            orbit.handle(&frame_input.events);
         }
+        orbit.aim(&mut camera, pos);
 
         // --- apply UI actions ---
         if ui.recording != prev_recording {
@@ -573,12 +670,15 @@ fn main() {
         // --- route dispatch (after the egui pass, so no live egui borrow) ---
         if map_actions.fly && route.wps.len() >= 2 {
             let alt = route.alt_up as f64;
-            let wps: Vec<Waypoint> = route
-                .wps
-                .iter()
-                .map(|w| Waypoint::ne_alt(w.north as f64, w.east as f64, alt))
-                .collect();
             if source.kind() == AircraftKind::FixedWing {
+                // Fixed-wing routes are PCI great circles: the minimap's local
+                // North/East become geodetic offsets from home.
+                let r = planet::PLANET_RADIUS;
+                let wps: Vec<Waypoint> = route
+                    .wps
+                    .iter()
+                    .map(|w| Waypoint::geodetic(w.north as f64 / r, w.east as f64 / r, alt))
+                    .collect();
                 let cfg = FwGuidanceConfig {
                     airspeed: route.cruise as f64,
                     ..FwGuidanceConfig::default()
@@ -589,6 +689,12 @@ fn main() {
                 });
                 ui.fw_route_on = true; // suppress manual cruise from now on
             } else {
+                // The quad flies its mission in its flat local-NED frame at home.
+                let wps: Vec<Waypoint> = route
+                    .wps
+                    .iter()
+                    .map(|w| Waypoint::ne_alt(w.north as f64, w.east as f64, alt))
+                    .collect();
                 // Quad missions need the INS (M3); switch + rebuild if necessary.
                 if ui.est_kind != 2 {
                     ui.est_kind = 2;
