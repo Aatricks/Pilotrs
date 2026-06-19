@@ -175,32 +175,30 @@ fn render_pose(view: &ViewSnapshot) -> (Vec3, Mat4) {
     }
 }
 
-/// The aircraft's `(north, east)` offset \[m\] from home and local course \[rad\]
-/// for the minimap, computed per airframe (the quad is already local NED; the
-/// fixed-wing is PCI → projected into the home tangent frame, course taken at the
-/// aircraft's own position so it stays correct as it flies away).
+/// The aircraft's geographic `(lat, lon)` \[rad\] and local course for the
+/// planisphere minimap. The quad flies in a flat local-NED patch at home
+/// (lat≈N/R, lon≈E/R near the prime-meridian equator); the fixed-wing is PCI.
 fn map_pose(view: &ViewSnapshot) -> (f32, f32, f32) {
+    let course = view.course() as f32;
     match view.kind {
-        AircraftKind::Quad => (
-            view.position.x as f32,
-            view.position.y as f32,
-            view.course() as f32,
-        ),
+        AircraftKind::Quad => {
+            let r = planet::PLANET_RADIUS;
+            (
+                (view.position.x / r) as f32,
+                (view.position.y / r) as f32,
+                course,
+            )
+        }
         AircraftKind::FixedWing => {
-            let anchor = planet::home_pci(0.0);
-            let ned = planet::ned_from_pci(anchor) * (view.position - anchor);
-            let vloc = planet::ned_from_pci(view.position) * view.velocity;
-            (ned.x as f32, ned.y as f32, vloc.y.atan2(vloc.x) as f32)
+            let (lat, lon, _) = planet::pci_to_geodetic(view.position);
+            (lat as f32, lon as f32, course)
         }
     }
 }
 
-/// Local North/East offset (metres) from home → a unit direction on the planet
-/// (home is the prime-meridian equator point, PCI `+x`). Used to sample the
-/// globe terrain for the minimap and to convert clicked map points to waypoints.
-fn ne_to_dir(north: f32, east: f32) -> Vec3 {
-    let r = planet::PLANET_RADIUS as f32;
-    let (lat, lon) = (north / r, east / r);
+/// Geographic latitude / longitude (rad) → unit direction on the planet
+/// (PCI: `+z` = North pole, lon 0 along `+x`).
+fn geo_dir3(lat: f32, lon: f32) -> Vec3 {
     let cl = lat.cos();
     vec3(cl * lon.cos(), cl * lon.sin(), lat.sin())
 }
@@ -280,25 +278,16 @@ fn opaque(context: &Context, r: u8, g: u8, b: u8) -> PhysicalMaterial {
 /// East offset maps to a direction on the globe ([`ne_to_dir`]) and we sample the
 /// spherical terrain there.
 impl TerrainLike for Terrain {
-    fn height(&self, north: f32, east: f32) -> f32 {
-        self.height_dir(ne_to_dir(north, east))
-    }
-    fn normal(&self, north: f32, east: f32) -> Vec3 {
-        // Local NED up-normal (z < 0) from central differences of the globe
-        // height in the home tangent map — exactly what the hillshade expects.
-        let d = 4.0;
-        let dhdn = (self.height_dir(ne_to_dir(north + d, east))
-            - self.height_dir(ne_to_dir(north - d, east)))
-            / (2.0 * d);
-        let dhde = (self.height_dir(ne_to_dir(north, east + d))
-            - self.height_dir(ne_to_dir(north, east - d)))
-            / (2.0 * d);
-        let nrm = vec3(-dhdn, -dhde, -1.0);
-        nrm / nrm.magnitude()
-    }
-    fn color(&self, north: f32, east: f32) -> (u8, u8, u8) {
-        let c = self.color_dir(ne_to_dir(north, east));
-        (c.r, c.g, c.b)
+    /// Shaded colour at a geographic point for the planisphere: the Earth-like
+    /// `color_dir` tinted by a hillshade from a fixed NW-and-above light in the
+    /// local tangent frame (so relief reads consistently across the whole map).
+    fn map_sample(&self, lat: f32, lon: f32) -> ((u8, u8, u8), f32) {
+        let dir = geo_dir3(lat, lon);
+        let c = self.color_dir(dir);
+        let (north, east) = OrbitCam::tangent(dir);
+        let light = (north * 0.45 - east * 0.35 + dir * 0.82).normalize();
+        let shade = (0.45 + 0.6 * self.normal_dir(dir).dot(light).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        ((c.r, c.g, c.b), shade)
     }
 }
 
@@ -527,8 +516,8 @@ fn main() {
         // --- update 3D transforms from the view (PCI render pose) ---
         let (pos, rot) = render_pose(&view);
         let pose = Mat4::from_translation(pos) * rot;
-        // Aircraft pose projected into the home tangent map (for the minimap).
-        let (map_n, map_e, map_course) = map_pose(&view);
+        // Aircraft geographic pose (lat, lon, course) for the planisphere.
+        let (map_lat, map_lon, map_course) = map_pose(&view);
         match view.kind {
             AircraftKind::Quad => {
                 body.set_transformation(pose * Mat4::from_nonuniform_scale(3.5, 3.5, 0.7));
@@ -556,7 +545,7 @@ fn main() {
             if trail_pts.len() > 1500 {
                 trail_pts.remove(0);
             }
-            map_trail.push((map_n, map_e));
+            map_trail.push((map_lat, map_lon));
             if map_trail.len() > 2000 {
                 map_trail.remove(0);
             }
@@ -604,8 +593,8 @@ fn main() {
                     ViewTelemetry::FixedWing(s) => fw_telemetry_window(egui_ui, s),
                 }
                 let mview = MinimapView {
-                    pos_north: map_n,
-                    pos_east: map_e,
+                    lat: map_lat,
+                    lon: map_lon,
                     course: map_course,
                     active_wp: view.waypoint_index,
                     trail: &map_trail,
@@ -676,13 +665,12 @@ fn main() {
         if map_actions.fly && route.wps.len() >= 2 {
             let alt = route.alt_up as f64;
             if source.kind() == AircraftKind::FixedWing {
-                // Fixed-wing routes are PCI great circles: the minimap's local
-                // North/East become geodetic offsets from home.
-                let r = planet::PLANET_RADIUS;
+                // Fixed-wing routes are PCI great circles from the planisphere's
+                // geographic (lat, lon) waypoints.
                 let wps: Vec<Waypoint> = route
                     .wps
                     .iter()
-                    .map(|w| Waypoint::geodetic(w.north as f64 / r, w.east as f64 / r, alt))
+                    .map(|w| Waypoint::geodetic(w.lat as f64, w.lon as f64, alt))
                     .collect();
                 let cfg = FwGuidanceConfig {
                     airspeed: route.cruise as f64,
@@ -694,11 +682,13 @@ fn main() {
                 });
                 ui.fw_route_on = true; // suppress manual cruise from now on
             } else {
-                // The quad flies its mission in its flat local-NED frame at home.
+                // The quad flies in its flat local-NED frame at home: map the
+                // geographic waypoints back to local N/E near the home point.
+                let r = planet::PLANET_RADIUS;
                 let wps: Vec<Waypoint> = route
                     .wps
                     .iter()
-                    .map(|w| Waypoint::ne_alt(w.north as f64, w.east as f64, alt))
+                    .map(|w| Waypoint::ne_alt(w.lat as f64 * r, w.lon as f64 * r, alt))
                     .collect();
                 // Quad missions need the INS (M3); switch + rebuild if necessary.
                 if ui.est_kind != 2 {

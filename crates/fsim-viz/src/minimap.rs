@@ -1,54 +1,46 @@
-//! Top-down route-planner minimap.
+//! Planisphere route planner — a flat **equirectangular world map** of the whole
+//! planet. The terrain is baked into one shaded-relief texture once (longitude →
+//! x, latitude → y); the visible window is a sub-rectangle of that texture, so
+//! **zooming** (scroll) and panning cost nothing. Clicking the map edits a route
+//! in geographic (latitude, longitude) coordinates; route legs are great circles
+//! drawn as projected polylines.
 //!
-//! A precomputed shaded-relief image of the terrain (uploaded to egui **once**),
-//! over which we paint the planned route, the recent trail, and the aircraft.
-//! Clicking the map edits the route in world (North, East) coordinates.
-//!
-//! ## Coordinate convention (do not drift)
-//! World is NED: x = North, y = East, z = Down. The map is **North up, East
-//! right**. So in *screen pixels* (see [`world_to_screen`]):
-//! ```text
-//!   screen.x = center.x + (E / half_extent) * (w/2)   // +East  -> +x (right)
-//!   screen.y = center.y - (N / half_extent) * (h/2)   // +North -> -y (UP)
-//! ```
-//! The y flip is the whole ballgame: North up means +N maps to a *smaller*
-//! pixel y. Every transform here carries that minus sign, and the aircraft
-//! marker ([`course_screen_dir`]) uses the same convention.
+//! ## Projection
+//! Longitude `lon ∈ (−π, π]` maps left→right, latitude `lat ∈ (−π/2, π/2)` maps
+//! bottom→top (North up). The view shows a window of half-spans
+//! `hlon = π/zoom`, `hlat = (π/2)/zoom` centred on `center = (lon, lat)`; the
+//! 2:1 longitude:latitude ratio keeps continents un-stretched at `zoom = 1`
+//! (the whole world).
 
 use three_d::egui::{
     self, Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Stroke, TextureHandle,
     TextureOptions, Vec2,
 };
 
-/// Side of the (square) relief texture in texels. 320² Color32 ≈ 410 KB — built
-/// once, well under egui's `max_texture_side`.
-const MAP_TEXELS: usize = 320;
+/// Equirectangular relief texture size (2:1). Built once at startup.
+const MAP_W: usize = 512;
+const MAP_H: usize = 256;
+const PI: f32 = std::f32::consts::PI;
+const FRAC_PI_2: f32 = std::f32::consts::FRAC_PI_2;
 
-/// Minimal trait so the minimap doesn't hard-depend on the concrete `Terrain`
-/// type (and stays unit-testable with a stub). Heights/normals are in the sim's
-/// NED frame (north, east in metres); an **up-facing** surface normal has a
-/// *negative* z (NED `+z` is Down), which the NW-and-above hillshade light
-/// below relies on.
+/// Minimal terrain interface for the map: a shaded colour at a geographic point.
+/// Returns `(rgb, hillshade ∈ [0,1])` so the relief reads as topography.
 pub trait TerrainLike {
-    fn height(&self, north: f32, east: f32) -> f32;
-    fn normal(&self, north: f32, east: f32) -> three_d::Vec3;
-    fn color(&self, north: f32, east: f32) -> (u8, u8, u8);
+    fn map_sample(&self, lat: f32, lon: f32) -> ((u8, u8, u8), f32);
 }
 
-/// One planned waypoint, in NED world metres (horizontal only; altitude is the
-/// route-wide [`Route::alt_up`]).
+/// One planned waypoint in **geographic** coordinates (radians).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RouteWp {
-    pub north: f32,
-    pub east: f32,
+    pub lat: f32,
+    pub lon: f32,
 }
 
 /// The editable route plus its shared parameters.
 #[derive(Clone, Debug)]
 pub struct Route {
     pub wps: Vec<RouteWp>,
-    /// Altitude applied to every leg, metres **+up** (converted to NED `-z` only
-    /// at dispatch).
+    /// Altitude applied to every leg, metres **+up**.
     pub alt_up: f32,
     /// Cruise airspeed \[m/s\] (fixed-wing only).
     pub cruise: f32,
@@ -58,9 +50,6 @@ impl Default for Route {
     fn default() -> Self {
         Self {
             wps: Vec::new(),
-            // Above the terrain's ~320 m mountain peaks so a fixed-wing route
-            // flies over the ridges, not through them (the sim has no terrain
-            // collision, but flying through a mountain looks wrong).
             alt_up: 400.0,
             cruise: 25.0,
         }
@@ -68,102 +57,91 @@ impl Default for Route {
 }
 
 impl Route {
+    /// Great-circle distance \[m\] between two waypoints.
     fn leg_len(a: RouteWp, b: RouteWp) -> f32 {
-        ((b.north - a.north).powi(2) + (b.east - a.east).powi(2)).sqrt()
+        let da = geo_dir(a.lat, a.lon);
+        let db = geo_dir(b.lat, b.lon);
+        let dot = (da[0] * db[0] + da[1] * db[1] + da[2] * db[2]).clamp(-1.0, 1.0);
+        R_PLANET * dot.acos()
     }
     pub fn total_len(&self) -> f32 {
         self.wps.windows(2).map(|w| Self::leg_len(w[0], w[1])).sum()
     }
-    pub fn leg_lens(&self) -> Vec<f32> {
-        self.wps
-            .windows(2)
-            .map(|w| Self::leg_len(w[0], w[1]))
-            .collect()
-    }
 }
 
-/// Plain per-frame view data the minimap paints (decouples it from `Source`).
+/// Per-frame aircraft projection the minimap paints.
 pub struct MinimapView<'a> {
-    /// Aircraft NED position (metres).
-    pub pos_north: f32,
-    pub pos_east: f32,
-    /// Course χ (rad) — `atan2(vel.y, vel.x)`, heading fallback near hover.
+    /// Aircraft geographic position (radians).
+    pub lat: f32,
+    pub lon: f32,
+    /// Course χ (rad) in the local NED frame.
     pub course: f32,
-    /// Active waypoint = the one we're flying toward (highlights `wp-1 -> wp`).
+    /// Active waypoint = the one we're flying toward (highlights `wp-1 → wp`).
     pub active_wp: Option<usize>,
-    /// Recent (north, east) trail samples; oldest first.
+    /// Recent `(lat, lon)` trail; oldest first.
     pub trail: &'a [(f32, f32)],
 }
 
 /// What the user did to the route this frame (consumed by `main.rs`).
 #[derive(Default)]
 pub struct MinimapActions {
-    /// "Fly route" pressed.
     pub fly: bool,
-    /// Route was cleared (so the caller can cancel the mission too).
     pub clear: bool,
 }
 
-/// Owns the cached relief texture + a little drag state.
+const R_PLANET: f32 = 6371.0;
+
+/// Owns the cached relief texture + zoom/pan/drag state.
 pub struct Minimap {
     tex: Option<TextureHandle>,
-    half_extent: f32,
+    zoom: f32,
+    /// View centre `(lon, lat)` in radians.
+    center: (f32, f32),
     dragging: Option<usize>,
 }
 
 impl Minimap {
-    pub fn new(half_extent: f32) -> Self {
+    pub fn new(_half_extent: f32) -> Self {
         Self {
             tex: None,
-            half_extent,
+            zoom: 1.0,
+            center: (0.0, 0.0),
             dragging: None,
         }
     }
 
-    /// Build the shaded-relief texture **once** and cache the handle. Hillshade
-    /// = clamp(n · L) with the light to the NW-and-above, plus a gentle
-    /// elevation ramp for legibility.
+    /// Build the whole-planet relief texture once.
     fn ensure_texture(&mut self, ctx: &egui::Context, terrain: &impl TerrainLike) {
         if self.tex.is_some() {
             return;
         }
-        let (w, h) = (MAP_TEXELS, MAP_TEXELS);
-        let he = self.half_extent;
-        let l = hillshade_light();
-        // Height span for the ramp (cheap two-pass; runs once at startup).
-        let mut hmin = f32::INFINITY;
-        let mut hmax = f32::NEG_INFINITY;
-        for j in 0..h {
-            for i in 0..w {
-                let (n, e) = texel_to_world(i, j, w, h, he);
-                let z = terrain.height(n, e);
-                hmin = hmin.min(z);
-                hmax = hmax.max(z);
+        let mut pixels = Vec::with_capacity(MAP_W * MAP_H);
+        for j in 0..MAP_H {
+            let lat = (1.0 - 2.0 * (j as f32 + 0.5) / MAP_H as f32) * FRAC_PI_2;
+            for i in 0..MAP_W {
+                let lon = (2.0 * (i as f32 + 0.5) / MAP_W as f32 - 1.0) * PI;
+                let ((r, g, b), shade) = terrain.map_sample(lat, lon);
+                let s = shade.clamp(0.0, 1.0);
+                pixels.push(Color32::from_rgb(
+                    (r as f32 * s) as u8,
+                    (g as f32 * s) as u8,
+                    (b as f32 * s) as u8,
+                ));
             }
         }
-        let span = (hmax - hmin).max(1.0);
-        let mut pixels = Vec::with_capacity(w * h);
-        for j in 0..h {
-            for i in 0..w {
-                let (n, e) = texel_to_world(i, j, w, h, he);
-                let z = terrain.height(n, e);
-                let nrm = terrain.normal(n, e); // NED up-normal (z < 0)
-                let lit = hillshade(nrm, l);
-                let t = ((z - hmin) / span).clamp(0.0, 1.0);
-                let (br, bg, bb) = terrain.color(n, e);
-                // Tint the base albedo by the elevation ramp, then by hillshade.
-                let r = (lerp_u8(br, 235, t) as f32 * lit) as u8;
-                let g = (lerp_u8(bg, 225, t) as f32 * lit) as u8;
-                let b = (lerp_u8(bb, 200, t) as f32 * lit) as u8;
-                pixels.push(Color32::from_rgb(r, g, b));
-            }
-        }
-        let img = ColorImage::new([w, h], pixels);
-        self.tex = Some(ctx.load_texture("minimap_relief", img, TextureOptions::LINEAR));
+        let img = ColorImage::new([MAP_W, MAP_H], pixels);
+        self.tex = Some(ctx.load_texture("planisphere", img, TextureOptions::LINEAR));
     }
 
-    /// Show the window. Returns actions the caller must apply (fly/clear). The
-    /// route is edited in place. `view` is the live aircraft projection.
+    /// Clamp the view centre so the visible window never runs off the world.
+    fn clamp_center(&mut self) {
+        self.zoom = self.zoom.clamp(1.0, 32.0);
+        let hlon = PI / self.zoom;
+        let hlat = FRAC_PI_2 / self.zoom;
+        self.center.0 = self.center.0.clamp(-PI + hlon, PI - hlon);
+        self.center.1 = self.center.1.clamp(-FRAC_PI_2 + hlat, FRAC_PI_2 - hlat);
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -176,53 +154,69 @@ impl Minimap {
         self.ensure_texture(ctx, terrain);
         let mut act = MinimapActions::default();
         let tex = self.tex.as_ref().expect("texture built above").clone();
-        let he = self.half_extent;
 
         egui::Window::new("Route planner")
             .default_pos([1180.0, 12.0])
             .default_width(360.0)
             .resizable(false)
             .show(ctx, |ui| {
-                let side = 320.0_f32;
-                // CRITICAL: click_and_drag so egui "uses the pointer" while the
-                // user interacts (so the OrbitCam skips the events — see the
-                // module-level event-consumption note in main.rs).
-                let (resp, painter) =
-                    ui.allocate_painter(Vec2::new(side, side), Sense::click_and_drag());
+                let (w, h) = (340.0_f32, 200.0_f32); // 1.7:1 canvas
+                let (resp, painter) = ui.allocate_painter(Vec2::new(w, h), Sense::click_and_drag());
                 let rect = resp.rect;
 
+                // --- zoom (scroll, toward the cursor) ---
+                if resp.hovered() {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll.abs() > 0.01 {
+                        if let Some(cur) = resp.hover_pos() {
+                            let (lat_c, lon_c) = self.to_world(rect, cur);
+                            self.zoom = (self.zoom * (1.0 + scroll * 0.0015)).clamp(1.0, 32.0);
+                            // Keep the cursor's world point fixed under the cursor.
+                            let hlon = PI / self.zoom;
+                            let hlat = FRAC_PI_2 / self.zoom;
+                            let fx = (cur.x - rect.center().x) / (rect.width() * 0.5);
+                            let fy = (cur.y - rect.center().y) / (rect.height() * 0.5);
+                            self.center = (lon_c - fx * hlon, lat_c + fy * hlat);
+                            self.clamp_center();
+                        }
+                    }
+                }
+
+                // --- terrain (visible UV sub-rect of the world texture) ---
+                let hlon = PI / self.zoom;
+                let hlat = FRAC_PI_2 / self.zoom;
+                let uc = (self.center.0 / PI + 1.0) * 0.5;
+                let vc = (1.0 - self.center.1 / FRAC_PI_2) * 0.5;
+                let uh = (hlon / PI) * 0.5;
+                let vh = (hlat / FRAC_PI_2) * 0.5;
                 painter.image(
                     tex.id(),
                     rect,
-                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                    Rect::from_min_max(Pos2::new(uc - uh, vc - vh), Pos2::new(uc + uh, vc + vh)),
                     Color32::WHITE,
                 );
                 let painter = painter.with_clip_rect(rect);
 
-                let to_screen = |n: f32, e: f32| world_to_screen(rect, he, n, e);
-                let to_world = |p: Pos2| screen_to_world(rect, he, p);
-
                 if !is_replay {
-                    handle_interaction(&resp, route, &mut self.dragging, &to_world, &to_screen);
+                    self.handle_interaction(&resp, route, rect);
                 }
 
-                // Route polyline (active leg highlighted).
-                if route.wps.len() >= 2 {
-                    let active = view.active_wp.unwrap_or(usize::MAX);
-                    for (i, w) in route.wps.windows(2).enumerate() {
-                        let a = to_screen(w[0].north, w[0].east);
-                        let b = to_screen(w[1].north, w[1].east);
-                        let stroke = if i + 1 == active {
-                            Stroke::new(3.0, Color32::from_rgb(255, 210, 60))
-                        } else {
-                            Stroke::new(2.0, Color32::from_rgb(90, 200, 210))
-                        };
-                        painter.line_segment([a, b], stroke);
+                // --- route great-circle legs ---
+                let active = view.active_wp.unwrap_or(usize::MAX);
+                for (i, w2) in route.wps.windows(2).enumerate() {
+                    let stroke = if i + 1 == active {
+                        Stroke::new(3.0, Color32::from_rgb(255, 210, 60))
+                    } else {
+                        Stroke::new(2.0, Color32::from_rgb(90, 200, 210))
+                    };
+                    let pts = self.great_circle_screen(rect, w2[0], w2[1]);
+                    if pts.len() >= 2 {
+                        painter.line(pts, stroke);
                     }
                 }
-                // Waypoint dots + index labels.
+                // --- waypoint dots + labels ---
                 for (i, wp) in route.wps.iter().enumerate() {
-                    let p = to_screen(wp.north, wp.east);
+                    let p = self.to_screen(rect, wp.lat, wp.lon);
                     let c = if Some(i) == view.active_wp {
                         Color32::from_rgb(255, 210, 60)
                     } else {
@@ -238,18 +232,21 @@ impl Minimap {
                         Color32::WHITE,
                     );
                 }
-                // Recent trail.
+                // --- recent trail ---
                 if view.trail.len() >= 2 {
-                    let pts: Vec<Pos2> = view.trail.iter().map(|&(n, e)| to_screen(n, e)).collect();
+                    let pts: Vec<Pos2> = view
+                        .trail
+                        .iter()
+                        .map(|&(la, lo)| self.to_screen(rect, la, lo))
+                        .collect();
                     painter.line(pts, Stroke::new(1.5, Color32::from_rgb(120, 120, 160)));
                 }
-                // Aircraft triangle, nose along course.
+                // --- aircraft ---
                 draw_aircraft(
                     &painter,
-                    to_screen(view.pos_north, view.pos_east),
+                    self.to_screen(rect, view.lat, view.lon),
                     view.course,
                 );
-                // North hint.
                 painter.text(
                     rect.left_top() + Vec2::new(6.0, 4.0),
                     Align2::LEFT_TOP,
@@ -258,9 +255,11 @@ impl Minimap {
                     Color32::WHITE,
                 );
 
-                // Controls below the map.
+                // --- controls ---
                 ui.add_space(4.0);
-                ui.add(egui::Slider::new(&mut route.alt_up, 0.0..=800.0).text("route alt (m, up)"));
+                ui.add(
+                    egui::Slider::new(&mut route.alt_up, 0.0..=2000.0).text("route alt (m, up)"),
+                );
                 if is_fixed_wing {
                     ui.add(egui::Slider::new(&mut route.cruise, 12.0..=35.0).text("cruise (m/s)"));
                 }
@@ -281,19 +280,18 @@ impl Minimap {
                     {
                         act.fly = true;
                     }
-                });
-                let legs = route.leg_lens();
-                ui.monospace(format!(
-                    "{} wp   total {:8.1} m",
-                    route.wps.len(),
-                    route.total_len()
-                ));
-                if let Some(active) = view.active_wp {
-                    if active >= 1 && active - 1 < legs.len() {
-                        ui.monospace(format!("leg {active}: {:8.1} m", legs[active - 1]));
+                    if ui.button("Reset view").clicked() {
+                        self.zoom = 1.0;
+                        self.center = (0.0, 0.0);
                     }
-                }
-                ui.label("click: add  ·  right-click: remove  ·  drag: move");
+                });
+                ui.monospace(format!(
+                    "{} wp   total {:8.0} m   zoom {:.1}×",
+                    route.wps.len(),
+                    route.total_len(),
+                    self.zoom
+                ));
+                ui.label("click: add · right-click: remove · drag: move · scroll: zoom");
                 if is_replay {
                     ui.colored_label(Color32::GRAY, "(replay: route editing disabled)");
                 }
@@ -301,96 +299,127 @@ impl Minimap {
 
         act
     }
-}
 
-/// World (north, east) → screen pixel (North up, East right; `+N → −y`).
-fn world_to_screen(rect: Rect, he: f32, n: f32, e: f32) -> Pos2 {
-    Pos2::new(
-        rect.center().x + (e / he) * (rect.width() * 0.5),
-        rect.center().y - (n / he) * (rect.height() * 0.5),
-    )
-}
+    /// Screen pixel for a geographic point under the current view.
+    fn to_screen(&self, rect: Rect, lat: f32, lon: f32) -> Pos2 {
+        let hlon = PI / self.zoom;
+        let hlat = FRAC_PI_2 / self.zoom;
+        let dlon = wrap_pi(lon - self.center.0);
+        Pos2::new(
+            rect.center().x + (dlon / hlon) * (rect.width() * 0.5),
+            rect.center().y - ((lat - self.center.1) / hlat) * (rect.height() * 0.5),
+        )
+    }
 
-/// Screen pixel → world (north, east). Inverse of [`world_to_screen`].
-fn screen_to_world(rect: Rect, he: f32, p: Pos2) -> (f32, f32) {
-    let e = (p.x - rect.center().x) / (rect.width() * 0.5) * he;
-    let n = -(p.y - rect.center().y) / (rect.height() * 0.5) * he;
-    (n, e)
-}
+    /// Geographic point (lat, lon) under a screen pixel.
+    fn to_world(&self, rect: Rect, p: Pos2) -> (f32, f32) {
+        let hlon = PI / self.zoom;
+        let hlat = FRAC_PI_2 / self.zoom;
+        let lon = self.center.0 + (p.x - rect.center().x) / (rect.width() * 0.5) * hlon;
+        let lat = (self.center.1 - (p.y - rect.center().y) / (rect.height() * 0.5) * hlat)
+            .clamp(-FRAC_PI_2 + 1e-4, FRAC_PI_2 - 1e-4);
+        (lat, wrap_pi(lon))
+    }
 
-/// Forward direction of the aircraft marker in *screen* space for a course χ:
-/// `dN → −y` (up), `dE → +x` (right). Course 0 (North) → (0, −1); +π/2 (East) →
-/// (+1, 0).
-fn course_screen_dir(course: f32) -> Vec2 {
-    Vec2::new(course.sin(), -course.cos())
-}
+    /// A great-circle leg, sampled and projected to screen-space points.
+    fn great_circle_screen(&self, rect: Rect, a: RouteWp, b: RouteWp) -> Vec<Pos2> {
+        let da = geo_dir(a.lat, a.lon);
+        let db = geo_dir(b.lat, b.lon);
+        let dot = (da[0] * db[0] + da[1] * db[1] + da[2] * db[2]).clamp(-1.0, 1.0);
+        let ang = dot.acos();
+        let steps = ((ang / 0.02).ceil() as usize).clamp(2, 256);
+        (0..=steps)
+            .map(|k| {
+                let t = k as f32 / steps as f32;
+                // SLERP on the sphere.
+                let (s0, s1) = if ang.abs() < 1e-5 {
+                    (1.0 - t, t)
+                } else {
+                    (
+                        ((1.0 - t) * ang).sin() / ang.sin(),
+                        (t * ang).sin() / ang.sin(),
+                    )
+                };
+                let d = [
+                    da[0] * s0 + db[0] * s1,
+                    da[1] * s0 + db[1] * s1,
+                    da[2] * s0 + db[2] * s1,
+                ];
+                let (lat, lon) = dir_geo(d);
+                self.to_screen(rect, lat, lon)
+            })
+            .collect()
+    }
 
-/// Add / move / remove waypoints from the canvas `Response`. Reads the pointer
-/// via the egui `Response` only (never raw three-d events).
-fn handle_interaction(
-    resp: &egui::Response,
-    route: &mut Route,
-    dragging: &mut Option<usize>,
-    to_world: &dyn Fn(Pos2) -> (f32, f32),
-    to_screen: &dyn Fn(f32, f32) -> Pos2,
-) {
-    let hit_radius = 9.0_f32;
-    if resp.drag_started() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            *dragging = nearest_wp(route, p, to_screen, hit_radius);
+    fn handle_interaction(&mut self, resp: &egui::Response, route: &mut Route, rect: Rect) {
+        let hit = 9.0_f32;
+        if resp.drag_started() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.dragging = self.nearest_wp(route, rect, p, hit);
+            }
         }
-    }
-    if resp.dragged() {
-        if let (Some(idx), Some(p)) = (*dragging, resp.interact_pointer_pos()) {
-            let (n, e) = to_world(p);
-            route.wps[idx] = RouteWp { north: n, east: e };
+        if resp.dragged() {
+            if let (Some(idx), Some(p)) = (self.dragging, resp.interact_pointer_pos()) {
+                let (lat, lon) = self.to_world(rect, p);
+                route.wps[idx] = RouteWp { lat, lon };
+            }
         }
-    }
-    if resp.drag_stopped() {
-        *dragging = None;
-    }
-    // Primary click that wasn't a drag-on-a-wp: append a waypoint.
-    if resp.clicked() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            if nearest_wp(route, p, to_screen, hit_radius).is_none() {
-                let (n, e) = to_world(p);
-                route.wps.push(RouteWp { north: n, east: e });
+        if resp.drag_stopped() {
+            self.dragging = None;
+        }
+        if resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                if self.nearest_wp(route, rect, p, hit).is_none() {
+                    let (lat, lon) = self.to_world(rect, p);
+                    route.wps.push(RouteWp { lat, lon });
+                }
+            }
+        }
+        if resp.secondary_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                if let Some(idx) = self.nearest_wp(route, rect, p, hit * 1.6) {
+                    route.wps.remove(idx);
+                }
             }
         }
     }
-    // Secondary click: remove nearest waypoint.
-    if resp.secondary_clicked() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            if let Some(idx) = nearest_wp(route, p, to_screen, hit_radius * 1.6) {
-                route.wps.remove(idx);
+
+    fn nearest_wp(&self, route: &Route, rect: Rect, p: Pos2, radius: f32) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, wp) in route.wps.iter().enumerate() {
+            let s = self.to_screen(rect, wp.lat, wp.lon);
+            let d2 = (s.x - p.x).powi(2) + (s.y - p.y).powi(2);
+            if d2 <= radius * radius && best.is_none_or(|(_, bd)| d2 < bd) {
+                best = Some((i, d2));
             }
         }
+        best.map(|(i, _)| i)
     }
 }
 
-fn nearest_wp(
-    route: &Route,
-    p: Pos2,
-    to_screen: &dyn Fn(f32, f32) -> Pos2,
-    radius: f32,
-) -> Option<usize> {
-    let mut best: Option<(usize, f32)> = None;
-    for (i, wp) in route.wps.iter().enumerate() {
-        let s = to_screen(wp.north, wp.east);
-        let d2 = (s.x - p.x).powi(2) + (s.y - p.y).powi(2);
-        if d2 <= radius * radius && best.is_none_or(|(_, bd)| d2 < bd) {
-            best = Some((i, d2));
-        }
-    }
-    best.map(|(i, _)| i)
+/// Geographic (lat, lon) → unit direction (PCI convention: +z = North pole,
+/// lon 0 along +x).
+fn geo_dir(lat: f32, lon: f32) -> [f32; 3] {
+    let cl = lat.cos();
+    [cl * lon.cos(), cl * lon.sin(), lat.sin()]
 }
 
-/// An isosceles triangle whose apex points along `course` (rad, χ).
+/// Unit direction → geographic (lat, lon).
+fn dir_geo(d: [f32; 3]) -> (f32, f32) {
+    let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
+    ((d[2] / r).clamp(-1.0, 1.0).asin(), d[1].atan2(d[0]))
+}
+
+/// Wrap an angle to `(−π, π]`.
+fn wrap_pi(x: f32) -> f32 {
+    x.sin().atan2(x.cos())
+}
+
+/// An isosceles triangle whose apex points along `course` (rad, χ): North up.
 fn draw_aircraft(painter: &egui::Painter, c: Pos2, course: f32) {
-    let fwd = course_screen_dir(course);
-    let right = Vec2::new(-fwd.y, fwd.x); // 90° CW of fwd in screen space
-    let len = 9.0;
-    let half = 5.0;
+    let fwd = Vec2::new(course.sin(), -course.cos());
+    let right = Vec2::new(-fwd.y, fwd.x);
+    let (len, half) = (9.0, 5.0);
     let nose = c + fwd * len;
     let l = c - fwd * (len * 0.5) + right * half;
     let r = c - fwd * (len * 0.5) - right * half;
@@ -401,136 +430,69 @@ fn draw_aircraft(painter: &egui::Painter, c: Pos2, course: f32) {
     ));
 }
 
-// --- helpers ---
-
-/// Texel `(i,j)` center → world (north, east). Row `j=0` is the TOP = max North.
-fn texel_to_world(i: usize, j: usize, w: usize, h: usize, he: f32) -> (f32, f32) {
-    let u = (i as f32 + 0.5) / w as f32; // 0..1 left→right = West→East
-    let v = (j as f32 + 0.5) / h as f32; // 0..1 top→bottom = North→South
-    let east = (u * 2.0 - 1.0) * he;
-    let north = (1.0 - v * 2.0) * he; // v=0 → +he (North up)
-    (north, east)
-}
-
-fn normalize3(a: f32, b: f32, c: f32) -> (f32, f32, f32) {
-    let m = (a * a + b * b + c * c).sqrt().max(1e-6);
-    (a / m, b / m, c / m)
-}
-
-/// Hillshade light direction (TOWARD the source): NW and above. Up-facing NED
-/// normals have `z < 0`, so "above" is the −z component — the light's z is
-/// negative so flat ground reads bright.
-fn hillshade_light() -> (f32, f32, f32) {
-    normalize3(0.4, -0.5, -0.75)
-}
-
-/// Diffuse hillshade (ambient floor + clamped `n · L`) for an up-facing NED
-/// normal `nrm` (z < 0) and light direction `l` (toward the source).
-fn hillshade(nrm: three_d::Vec3, l: (f32, f32, f32)) -> f32 {
-    let shade = (nrm.x * l.0 + nrm.y * l.1 + nrm.z * l.2).clamp(0.0, 1.0);
-    0.35 + 0.65 * shade // ambient floor + diffuse
-}
-
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t)
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn map() -> Minimap {
+        Minimap::new(0.0)
+    }
     fn rect() -> Rect {
-        // A 320×320 canvas at the origin.
-        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(320.0, 320.0))
+        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(340.0, 200.0))
     }
 
     #[test]
     fn screen_world_round_trip() {
+        let m = map(); // zoom 1, centre (0,0)
         let r = rect();
-        let he = 500.0;
-        for &(n, e) in &[(0.0, 0.0), (250.0, -100.0), (-400.0, 480.0), (123.0, 45.0)] {
-            let p = world_to_screen(r, he, n, e);
-            let (n2, e2) = screen_to_world(r, he, p);
-            assert!((n - n2).abs() < 1e-3, "north {n} != {n2}");
-            assert!((e - e2).abs() < 1e-3, "east {e} != {e2}");
+        for &(lat, lon) in &[(0.0, 0.0), (0.5, -1.0), (-0.9, 2.0), (0.2, 0.7)] {
+            let p = m.to_screen(r, lat, lon);
+            let (la, lo) = m.to_world(r, p);
+            assert!((la - lat).abs() < 1e-3, "lat {lat} != {la}");
+            assert!((lo - lon).abs() < 1e-3, "lon {lon} != {lo}");
         }
     }
 
     #[test]
-    fn north_up_east_right_known_points() {
+    fn equator_prime_meridian_is_centre() {
+        let m = map();
         let r = rect();
-        let he = 500.0;
-        let center = r.center();
-        // +North (max) → top-center: same x, smaller y.
-        let top = world_to_screen(r, he, he, 0.0);
-        assert!((top.x - center.x).abs() < 1e-3);
-        assert!(top.y < center.y, "max North should map ABOVE center");
-        assert!((top.y - r.top()).abs() < 1e-3, "max North → top edge");
-        // +East (max) → right-center: same y, larger x.
-        let right = world_to_screen(r, he, 0.0, he);
-        assert!((right.y - center.y).abs() < 1e-3);
-        assert!(right.x > center.x, "max East should map RIGHT of center");
-        assert!((right.x - r.right()).abs() < 1e-3, "max East → right edge");
+        let c = m.to_screen(r, 0.0, 0.0);
+        assert!((c.x - r.center().x).abs() < 1e-3);
+        assert!((c.y - r.center().y).abs() < 1e-3);
+        // +lat is up (smaller y); +lon is right (larger x).
+        assert!(m.to_screen(r, 1.0, 0.0).y < c.y);
+        assert!(m.to_screen(r, 0.0, 1.0).x > c.x);
     }
 
     #[test]
-    fn aircraft_heading_directions() {
-        // Course 0 (North) → up = (0, -1).
-        let up = course_screen_dir(0.0);
-        assert!(up.x.abs() < 1e-6 && (up.y + 1.0).abs() < 1e-6, "{up:?}");
-        // Course +π/2 (East) → right = (+1, 0).
-        let east = course_screen_dir(std::f32::consts::FRAC_PI_2);
-        assert!(
-            (east.x - 1.0).abs() < 1e-6 && east.y.abs() < 1e-6,
-            "{east:?}"
-        );
+    fn geo_dir_round_trips() {
+        for &(lat, lon) in &[(0.0, 0.0), (0.6, 1.5), (-0.9, -2.7)] {
+            let (la, lo) = dir_geo(geo_dir(lat, lon));
+            assert!((la - lat).abs() < 1e-5 && (lo - lon).abs() < 1e-5);
+        }
     }
 
     #[test]
-    fn hillshade_lights_up_facing_ground() {
-        let l = hillshade_light();
-        // Flat ground: up-facing normal in NED has z = -1 → near full diffuse.
-        let lit_flat = hillshade(three_d::Vec3::new(0.0, 0.0, -1.0), l);
-        assert!(
-            lit_flat > 0.8,
-            "flat up-facing ground should be bright: {lit_flat}"
-        );
-        // A down-facing normal (z = +1, into the ground) must sit at the ambient
-        // floor — guards against the light/normal sign convention flipping.
-        let lit_down = hillshade(three_d::Vec3::new(0.0, 0.0, 1.0), l);
-        assert!(
-            lit_down < 0.4,
-            "down-facing should be at the ambient floor: {lit_down}"
-        );
-        assert!(
-            lit_flat > lit_down,
-            "up-facing must be brighter than down-facing"
-        );
+    fn aircraft_heading_north_points_up() {
+        // Course 0 (North) → marker forward (0, -1).
+        let fwd = Vec2::new(0.0_f32.sin(), -0.0_f32.cos());
+        assert!(fwd.x.abs() < 1e-6 && (fwd.y + 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn route_lengths() {
-        let route = Route {
+    fn route_leg_length_is_arc() {
+        let r = Route {
             wps: vec![
+                RouteWp { lat: 0.0, lon: 0.0 },
                 RouteWp {
-                    north: 0.0,
-                    east: 0.0,
-                },
-                RouteWp {
-                    north: 300.0,
-                    east: 0.0,
-                },
-                RouteWp {
-                    north: 300.0,
-                    east: 400.0,
+                    lat: 0.0,
+                    lon: FRAC_PI_2,
                 },
             ],
             ..Default::default()
         };
-        assert!((route.total_len() - 700.0).abs() < 1e-3);
-        assert_eq!(route.leg_lens().len(), 2);
-        assert!((route.leg_lens()[1] - 400.0).abs() < 1e-3);
+        // Quarter way around the planet.
+        assert!((r.total_len() - R_PLANET * FRAC_PI_2).abs() < 1.0);
     }
 }

@@ -116,11 +116,12 @@ fixed-wing flies the planet with **full spherical physics** (gravity points to
 the core; "level" follows the curve) and **great-circle routes**; the quad flies
 its mission in a flat local-tangent patch at home (it never strays far enough for
 curvature to matter). The follow-camera orbits the globe with a local-radial up
-vector. The **Route planner** minimap is a top-down tangent map at home — click
-to drop waypoints, drag to move, right-click to remove — and **Fly route**
-dispatches it to the active aircraft (the quad as an INS waypoint mission, the
-fixed-wing as a great-circle route, tuned so the ground track converges onto each
-leg smoothly instead of snaking). The **Flight controls** window switches the estimator (CF / MEKF / INS),
+vector. The **Route planner** is a **planisphere** — an equirectangular world map
+of the whole planet you can scroll to zoom — click to drop waypoints anywhere,
+drag to move, right-click to remove; route legs draw as great circles. **Fly
+route** dispatches it to the active aircraft (the quad as an INS waypoint mission,
+the fixed-wing as a great-circle route, tuned so the ground track converges onto
+each leg smoothly instead of snaking). The **Flight controls** window switches the estimator (CF / MEKF / INS),
 the inner controller (PID / LQR), and sets the attitude / cruise setpoint; the
 telemetry window plots estimate-vs-truth-vs-setpoint (quad) or airspeed /
 altitude / course (fixed-wing).
