@@ -15,7 +15,9 @@ mod forces;
 mod integrator;
 mod plant;
 
-pub use fixedwing::{fixedwing_wrench, trim, FixedWingParams, Trim};
+pub use fixedwing::{
+    fixedwing_wrench, short_period_modes, trim, FixedWingParams, ShortPeriodModes, Trim,
+};
 pub use forces::aerodynamic_wrench;
 pub use integrator::{Euler, Integrator, Rk4};
 pub use plant::{rigid_body_deriv, MultirotorParams, Plant, RigidBody};

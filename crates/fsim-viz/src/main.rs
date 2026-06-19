@@ -24,6 +24,7 @@
 //! y = East, z = Down). The camera's up vector is world `-z`, so altitude
 //! (`-z`) points up on screen.
 
+mod input;
 mod minimap;
 mod replay;
 mod terrain;
@@ -33,6 +34,7 @@ use fsim_sim::{
     Command, ControllerKind, FixedWingSetpoint, FwCommand, FwGuidanceConfig, FwSample, FwSimConfig,
     GuidanceConfig, Quat, Recording, Setpoint, SimConfig, TelemetrySample, Waypoint,
 };
+use input::StickSource;
 use minimap::{Minimap, MinimapActions, MinimapView, Route, TerrainLike};
 use replay::{AircraftKind, ReplayState, Source, ViewSnapshot, ViewTelemetry};
 use terrain::Terrain;
@@ -50,6 +52,12 @@ const GLOBE_BANDS: usize = 400;
 struct Ui {
     // Airframe selection.
     fixed_wing: bool,
+    /// The fixed-wing is the relaxed-stability fighter under manual (pilot)
+    /// control, not the autopilot UAV. Implies `fixed_wing`.
+    fighter: bool,
+    /// Pilot's intent for the fly-by-wire toggle (authoritative; the snapshot's
+    /// `fbw_on` just confirms it). Flipped by the F key / gamepad button.
+    fbw_on: bool,
     do_airframe_switch: bool,
     // Quad-specific.
     est_kind: u8,
@@ -131,7 +139,13 @@ fn make_source(ui: &Ui) -> Source {
         // routes are drawn on the minimap. Spawn above the mountain peaks
         // (≈320 m) so level cruise and routes fly over the terrain, not through
         // it (the sim has no terrain collision).
-        Source::live_fixedwing(FwSimConfig::aerosonde_at(ui.fw_altitude as f64))
+        let cfg = if ui.fighter {
+            // The relaxed-stability fighter under manual fly-by-wire control.
+            FwSimConfig::fighter_manual(ui.fw_altitude as f64)
+        } else {
+            FwSimConfig::aerosonde_at(ui.fw_altitude as f64)
+        };
+        Source::live_fixedwing(cfg)
     } else {
         // Quad missions need the INS estimator — `build_cfg(2, _)` — or the
         // worker silently counts SetMission as rejected.
@@ -441,6 +455,8 @@ fn main() {
     let hover = make_cfg(2).hover_thrust();
     let mut ui = Ui {
         fixed_wing: false,
+        fighter: false,
+        fbw_on: true,
         do_airframe_switch: false,
         est_kind: 2,           // default to the INS stack
         controller_lqr: false, // default to the cascaded PID
@@ -466,6 +482,13 @@ fn main() {
     let mut source = make_source(&ui);
     let record_path = std::env::temp_dir().join("pilotrs_live.fsimrec");
 
+    // The fighter's level-cruise trim throttle (from the solver, not a guess), so
+    // the manual throttle holds speed before the pilot touches it.
+    let fighter_trim_throttle = FwSimConfig::fighter().fbw.throttle_trim as f32;
+
+    // Pilot input (keyboard + gamepad) for the manual fighter, seeded at trim.
+    let mut stick_src = StickSource::new(fighter_trim_throttle);
+
     let mut gui = GUI::new(&context);
 
     window.render_loop(move |mut frame_input| {
@@ -475,6 +498,11 @@ fn main() {
         source.tick(dt_frame); // advances replay; the live engines pace themselves
 
         let view = source.view();
+
+        // Read the pilot's stick + toggle/reset edges for this frame (used by the
+        // manual fighter; harmless otherwise). Events are read before egui's pass.
+        stick_src.handle_window_events(&frame_input.events);
+        let pilot = stick_src.poll(dt_frame as f32);
 
         // Drive the live engine from the UI (no-op in replay mode). Physics runs
         // on its own thread; these are just commands.
@@ -498,11 +526,19 @@ fn main() {
                 AircraftKind::FixedWing => {
                     source.fw_command(FwCommand::Pause(ui.paused));
                     source.fw_command(FwCommand::SetSpeed(ui.speed as f64));
-                    // Manual cruise only when not flying a route. Gate on the
-                    // *synchronous* flag, not the lagging snapshot's
-                    // `waypoint_index`: dispatching SetRoute later this frame
-                    // would otherwise race a stale SetCruise that cancels it.
-                    if !ui.fw_route_on {
+                    if ui.fighter {
+                        // Pilot in the loop: drive the fly-by-wire from the stick.
+                        // The F-key/gamepad edge flips our authoritative intent.
+                        if pilot.toggle_fbw {
+                            ui.fbw_on = !ui.fbw_on;
+                        }
+                        source.fw_command(FwCommand::SetFbw(ui.fbw_on));
+                        source.fw_command(FwCommand::SetStick(pilot.stick));
+                    } else if !ui.fw_route_on {
+                        // Autopilot cruise only when not flying a route. Gate on
+                        // the *synchronous* flag, not the lagging snapshot's
+                        // `waypoint_index`: dispatching SetRoute later this frame
+                        // would otherwise race a stale SetCruise that cancels it.
                         source.fw_command(FwCommand::SetCruise(FixedWingSetpoint {
                             airspeed: ui.fw_airspeed as f64,
                             altitude: ui.fw_altitude as f64,
@@ -572,10 +608,16 @@ fn main() {
         ui.do_airframe_switch = false;
         ui.replay_toggle_play = false;
         ui.replay_seek = None;
+        // Fighter reset-to-trim (R key / gamepad Start) re-spawns at trim. Set it
+        // here, after the one-shot clears above, so the rebuild block acts on it.
+        if ui.fighter && pilot.reset {
+            ui.do_reset = true;
+        }
         let prev_recording = ui.recording;
         let is_fixed_wing = source.kind() == AircraftKind::FixedWing;
         let is_replay = source.is_replay();
         let telemetry = source.telemetry();
+        let has_gamepad = stick_src.has_gamepad();
         let mut map_actions = MinimapActions::default();
 
         // GUI first so it can mark pointer events handled before the camera
@@ -588,6 +630,9 @@ fn main() {
             frame_input.device_pixel_ratio,
             |egui_ui| {
                 controls_window(egui_ui, &view, hover, &mut ui, replay_info);
+                if view.manual {
+                    hud_overlay(egui_ui.ctx(), &view, has_gamepad);
+                }
                 match &telemetry {
                     ViewTelemetry::Quad(s) => telemetry_window(egui_ui, s),
                     ViewTelemetry::FixedWing(s) => fw_telemetry_window(egui_ui, s),
@@ -631,6 +676,12 @@ fn main() {
             trail_pts.clear();
             map_trail.clear();
             ui.fw_route_on = false; // a fresh engine has no route installed
+            if ui.fighter {
+                // Fresh fighter spawns at trim with the FCS engaged; recenter the
+                // stick to a trim-throttle hold.
+                ui.fbw_on = true;
+                stick_src.recenter(fighter_trim_throttle);
+            }
             if ui.do_reset {
                 ui.roll = 0.0;
                 ui.pitch = 0.0;
@@ -783,12 +834,23 @@ fn controls_window(
                 // --- airframe selector (switching rebuilds the source) ---
                 ui.label("airframe");
                 ui.horizontal(|ui| {
-                    if ui.radio(!st.fixed_wing, "Quad").clicked() && st.fixed_wing {
+                    let quad = !st.fixed_wing;
+                    let fw_ap = st.fixed_wing && !st.fighter;
+                    let fighter = st.fixed_wing && st.fighter;
+                    if ui.radio(quad, "Quad").clicked() && !quad {
                         st.fixed_wing = false;
+                        st.fighter = false;
                         st.do_airframe_switch = true;
                     }
-                    if ui.radio(st.fixed_wing, "Fixed-wing").clicked() && !st.fixed_wing {
+                    if ui.radio(fw_ap, "Fixed-wing").clicked() && !fw_ap {
                         st.fixed_wing = true;
+                        st.fighter = false;
+                        st.do_airframe_switch = true;
+                    }
+                    if ui.radio(fighter, "Fighter (FBW)").clicked() && !fighter {
+                        st.fixed_wing = true;
+                        st.fighter = true;
+                        st.fbw_on = true;
                         st.do_airframe_switch = true;
                     }
                 });
@@ -796,6 +858,8 @@ fn controls_window(
 
                 if !st.fixed_wing {
                     quad_controls(ui, view, hover, st);
+                } else if st.fighter {
+                    fighter_controls(ui, st);
                 } else {
                     ui.label("Fixed-wing cruise (or draw a route on the minimap)");
                     ui.add(egui::Slider::new(&mut st.fw_airspeed, 12.0..=35.0).text("airspeed"));
@@ -861,6 +925,90 @@ fn controls_window(
                     s.aileron, s.elevator, s.rudder, s.throttle
                 ));
             }
+        });
+}
+
+/// The relaxed-stability fighter's manual panel: the FCS toggle + the keymap +
+/// the spawn altitude. The toggle is the whole demo — ON the airframe is docile,
+/// OFF it diverges within a second.
+fn fighter_controls(ui: &mut egui::Ui, st: &mut Ui) {
+    ui.label("RELAXED-STABILITY FIGHTER — you have the stick.");
+    let (txt, col) = if st.fbw_on {
+        ("FCS: ON — flyable", egui::Color32::from_rgb(60, 200, 90))
+    } else {
+        (
+            "FCS: OFF — diverging!",
+            egui::Color32::from_rgb(235, 70, 60),
+        )
+    };
+    if ui
+        .add(
+            egui::Button::new(
+                egui::RichText::new(txt)
+                    .color(egui::Color32::BLACK)
+                    .strong(),
+            )
+            .fill(col)
+            .min_size(egui::vec2(220.0, 26.0)),
+        )
+        .clicked()
+    {
+        st.fbw_on = !st.fbw_on;
+    }
+    ui.monospace("F toggle FCS    R reset to trim");
+    ui.separator();
+    ui.label("controls (keyboard or gamepad)");
+    ui.monospace("pitch  W/↑   S/↓");
+    ui.monospace("roll   A/←   D/→");
+    ui.monospace("yaw    Q     E");
+    ui.monospace("thrust Shift / Ctrl");
+    ui.separator();
+    ui.add(egui::Slider::new(&mut st.fw_altitude, 100.0..=1500.0).text("spawn alt (m)"));
+}
+
+/// The pilot HUD overlay for the fighter: a prominent FCS ON/OFF banner (with a
+/// DIVERGING warning when off) plus an airspeed/altitude/AoA/g readout. Drawn as
+/// borderless anchored egui areas over the 3D scene.
+fn hud_overlay(ctx: &egui::Context, view: &ViewSnapshot, has_gamepad: bool) {
+    let (roll, pitch, _) = view.local_attitude().euler_angles();
+    let speed = view.velocity.norm();
+    let on = view.fbw_on;
+
+    egui::Area::new(egui::Id::new("hud_fcs"))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                let (txt, col) = if on {
+                    ("FCS: ON", egui::Color32::from_rgb(60, 200, 90))
+                } else {
+                    ("FCS: OFF", egui::Color32::from_rgb(235, 70, 60))
+                };
+                ui.label(egui::RichText::new(txt).color(col).strong().size(24.0));
+                if !on {
+                    ui.label(
+                        egui::RichText::new("⚠ DIVERGING — press F")
+                            .color(egui::Color32::from_rgb(235, 70, 60))
+                            .strong(),
+                    );
+                }
+            });
+        });
+
+    egui::Area::new(egui::Id::new("hud_readout"))
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.monospace(format!("airspeed {speed:6.1} m/s"));
+                ui.monospace(format!("altitude {:6.1} m", view.altitude()));
+                ui.monospace(format!("AoA      {:6.1} deg", view.alpha.to_degrees()));
+                ui.monospace(format!("load     {:6.2} g", view.load_factor));
+                ui.monospace(format!("pitch    {:6.1} deg", pitch.to_degrees()));
+                ui.monospace(format!("roll     {:6.1} deg", roll.to_degrees()));
+                ui.monospace(format!(
+                    "input    {}",
+                    if has_gamepad { "gamepad" } else { "keyboard" }
+                ));
+            });
         });
 }
 

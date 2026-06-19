@@ -7,3 +7,7 @@
 
 # local development scratchpad / notes
 .remember/
+
+# blank-and-fill answer key (reference implementations of the blanked theory
+# functions) — kept out of git so the answers never leak into history
+/reference/

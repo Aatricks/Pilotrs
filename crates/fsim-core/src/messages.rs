@@ -178,3 +178,49 @@ pub struct ControlLimits {
     /// Throttle `(min, max)`.
     pub throttle: (Real, Real),
 }
+
+/// A human pilot's normalized stick demand — what a joystick/keyboard produces,
+/// before any control law turns it into surfaces. Frame-agnostic *intent*: the
+/// fly-by-wire law (or a direct passthrough) maps it onto [`FixedWingControls`].
+///
+/// Conventions (matching the FRD body frame, pilot's view):
+/// - `pitch`: +1 = full **nose-up** demand (pull back), −1 = nose-down.
+/// - `roll`:  +1 = roll **right**, −1 = roll left.
+/// - `yaw`:   +1 = nose **right** (yaw right), −1 = yaw left.
+/// - `throttle`: 0 = idle, 1 = full.
+///
+/// `pitch/roll/yaw ∈ [−1, 1]`, `throttle ∈ [0, 1]` once [`clamped`](Self::clamped).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StickInput {
+    /// Pitch demand ∈ [−1, 1] (+ = nose up).
+    pub pitch: Real,
+    /// Roll demand ∈ [−1, 1] (+ = roll right).
+    pub roll: Real,
+    /// Yaw demand ∈ [−1, 1] (+ = yaw right).
+    pub yaw: Real,
+    /// Throttle ∈ [0, 1].
+    pub throttle: Real,
+}
+
+impl StickInput {
+    /// Centred stick, idle throttle.
+    pub fn neutral() -> Self {
+        Self {
+            pitch: 0.0,
+            roll: 0.0,
+            yaw: 0.0,
+            throttle: 0.0,
+        }
+    }
+
+    /// Clamp every axis into its valid range (defensive: input devices and
+    /// rate-limiters can briefly overshoot).
+    pub fn clamped(self) -> Self {
+        Self {
+            pitch: self.pitch.clamp(-1.0, 1.0),
+            roll: self.roll.clamp(-1.0, 1.0),
+            yaw: self.yaw.clamp(-1.0, 1.0),
+            throttle: self.throttle.clamp(0.0, 1.0),
+        }
+    }
+}

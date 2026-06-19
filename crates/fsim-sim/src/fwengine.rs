@@ -15,7 +15,7 @@ use crate::fixedwing::{FwSample, FwSim, FwSimConfig};
 use crate::fw_guidance::FwGuidanceConfig;
 use crate::guidance::Waypoint;
 use fsim_control::FixedWingSetpoint;
-use fsim_core::{FixedWingControls, Real, State13, Tick};
+use fsim_core::{FixedWingControls, Real, State13, StickInput, Tick};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -35,6 +35,14 @@ pub struct FwSnapshot {
     pub airspeed: Real,
     pub altitude: Real,
     pub course: Real,
+    /// Angle of attack \[rad\] (for the HUD).
+    pub alpha: Real,
+    /// Aerodynamic load factor \[g\] (for the HUD).
+    pub load_factor: Real,
+    /// Flying under manual (pilot-stick) control.
+    pub manual: bool,
+    /// Fly-by-wire FCS engaged (only meaningful when `manual`).
+    pub fbw_on: bool,
     pub paused: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
     /// from `tick`, which only advances when the physics steps).
@@ -53,6 +61,10 @@ impl FwSnapshot {
             airspeed: sim.airspeed(),
             altitude: sim.altitude(),
             course: sim.course(),
+            alpha: sim.alpha(),
+            load_factor: sim.load_factor(),
+            manual: sim.is_manual(),
+            fbw_on: sim.fbw_on(),
             paused,
             seq,
         }
@@ -91,6 +103,12 @@ pub enum FwCommand {
     },
     /// Clear any route and hold this raw airspeed/altitude/course.
     SetCruise(FixedWingSetpoint),
+    /// Switch to manual (pilot-stick) control; `bool` is the initial FCS state.
+    EnterManual(bool),
+    /// Update the pilot's stick demand (manual mode only).
+    SetStick(StickInput),
+    /// Toggle the fly-by-wire FCS on/off (manual mode only).
+    SetFbw(bool),
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -247,6 +265,9 @@ impl Worker {
             FwCommand::SetRoute { waypoints, cfg } => self.sim.set_route(waypoints, cfg),
             // `set_setpoint` itself cancels any active route (back to setpoint mode).
             FwCommand::SetCruise(sp) => self.sim.set_setpoint(sp),
+            FwCommand::EnterManual(fbw_on) => self.sim.enter_manual(fbw_on),
+            FwCommand::SetStick(s) => self.sim.set_stick(s),
+            FwCommand::SetFbw(on) => self.sim.set_fbw(on),
             FwCommand::Pause(p) => self.paused = p,
             FwCommand::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             FwCommand::Reset(cfg) => {

@@ -38,6 +38,14 @@ pub struct ViewSnapshot {
     pub motors: [Real; 4],
     /// Fixed-wing control surfaces; `None` for quad.
     pub surfaces: Option<FixedWingControls>,
+    /// Flying under manual (pilot-stick) control (fixed-wing fighter).
+    pub manual: bool,
+    /// Fly-by-wire FCS engaged (only meaningful when `manual`).
+    pub fbw_on: bool,
+    /// Angle of attack \[rad\] (fixed-wing; 0 for quad).
+    pub alpha: Real,
+    /// Aerodynamic load factor \[g\] (fixed-wing; 0 for quad).
+    pub load_factor: Real,
 }
 
 impl ViewSnapshot {
@@ -51,6 +59,10 @@ impl ViewSnapshot {
             waypoint_index: s.waypoint_index,
             motors: s.motors,
             surfaces: None,
+            manual: false,
+            fbw_on: false,
+            alpha: 0.0,
+            load_factor: 0.0,
         }
     }
 
@@ -64,6 +76,10 @@ impl ViewSnapshot {
             waypoint_index: s.waypoint_index,
             motors: [0.0; 4],
             surfaces: Some(s.controls),
+            manual: s.manual,
+            fbw_on: s.fbw_on,
+            alpha: s.alpha,
+            load_factor: s.load_factor,
         }
     }
 

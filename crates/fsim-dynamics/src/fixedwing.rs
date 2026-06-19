@@ -154,6 +154,25 @@ impl FixedWingParams {
         }
     }
 
+    /// A **relaxed-stability** airframe: the Aerosonde with its centre of gravity
+    /// moved aft of the aerodynamic centre, i.e. a *negative static margin*. The
+    /// only change from [`aerosonde`](Self::aerosonde) is the sign of `cm_alpha`
+    /// (−0.38 → **+0.30**) — every other coefficient, mass, and inertia is
+    /// identical. That single flip is exactly what relaxed stability *is*, and it
+    /// turns the docile, self-correcting UAV into a divergent airframe: the
+    /// short-period mode picks up a positive real eigenvalue (time-to-double a
+    /// few tenths of a second), so it pitches away from trim and tumbles within
+    /// about a second unless a control law holds it. It still *trims* — an
+    /// unstable equilibrium is still an equilibrium — so the Newton [`trim`]
+    /// solver converges; it just can't be flown open-loop.
+    pub fn fighter_relaxed() -> Self {
+        Self {
+            // Aft CG → the pitching moment now *grows* with angle of attack.
+            cm_alpha: 0.30,
+            ..Self::aerosonde()
+        }
+    }
+
     /// Stall blend σ(α) ∈ [0,1]: ~0 in the linear regime, 0.5 at the stall
     /// angle, →1 past it (Beard & McLain sigmoid).
     fn sigma(&self, alpha: Real) -> Real {
@@ -339,6 +358,92 @@ pub fn trim(p: &FixedWingParams, va: Real, gamma: Real) -> Option<Trim> {
             throttle: x[2],
         },
     })
+}
+
+/// The two eigenvalues of the short-period mode, each as a `(real, imag)` pair.
+///
+/// The sign of the largest real part is the whole story: `< 0` ⇒ perturbations
+/// decay (flyable); `> 0` ⇒ they grow (the relaxed-stability airframe diverging
+/// open-loop). This is the *formal* counterpart to watching the sim tumble.
+#[derive(Debug, Clone, Copy)]
+pub struct ShortPeriodModes {
+    /// Eigenvalues `[(re, im); 2]` of the 2×2 `[α, q]` state matrix.
+    pub eig: [(Real, Real); 2],
+}
+
+impl ShortPeriodModes {
+    /// The largest real part across both eigenvalues (the dominant growth rate).
+    pub fn max_real(&self) -> Real {
+        Float::max(self.eig[0].0, self.eig[1].0)
+    }
+
+    /// Stable iff every eigenvalue sits strictly in the left-half plane.
+    pub fn is_stable(&self) -> bool {
+        self.max_real() < 0.0
+    }
+
+    /// Time for the most unstable mode to double in amplitude \[s\]; only
+    /// meaningful when [`max_real`](Self::max_real) `> 0`.
+    pub fn time_to_double(&self) -> Real {
+        core::f64::consts::LN_2 / self.max_real()
+    }
+}
+
+/// Linearize the **short-period** pitch dynamics about a trim point and return
+/// the two eigenvalues. The reduced state is `[α, q]` (angle of attack, pitch
+/// rate) at fixed airspeed — the textbook approximation that isolates the fast
+/// pitch mode where the static-margin instability lives.
+///
+/// The `2×2` state matrix `A = ∂[α̇, q̇]/∂[α, q]` is *finite-differenced from the
+/// real aero + rigid-body model* (not re-derived by hand), so it can never drift
+/// out of sync with [`fixedwing_wrench`]. Gravity is excluded (it drives the slow
+/// phugoid, not this mode), so only the aerodynamic/thrust forces enter `α̇`:
+///
+/// ```text
+/// α̇ = q + (u·Fz_body − w·Fx_body) / (m·Va²)      (flight-path rotation in pitch)
+/// q̇ = M_body.y / Iyy  (via the shared EOM, incl. the Jxz cross term)
+/// ```
+///
+/// `elevator_of(α, q)` supplies the elevator deflection as a function of the
+/// state: pass a constant (`|_, _| δe_trim`) for the **open-loop** matrix, or the
+/// fly-by-wire feedback law for the **closed-loop** matrix. Folding the feedback
+/// into `A` this way makes the eigenvalues a direct, faithful check of the FCS.
+/// It is `FnMut` so the closure can drive a stateful controller (e.g. call the
+/// real `FlyByWire::step`) rather than only a hand-coded gain expression.
+pub fn short_period_modes(
+    p: &FixedWingParams,
+    trim: &Trim,
+    mut elevator_of: impl FnMut(Real, Real) -> Real,
+) -> ShortPeriodModes {
+    // ┌─ BLANK-AND-FILL · theory 1 of 2 · the short-period linearization ───────┐
+    // Reference answer: reference/dynamics_fixedwing.rs.reference  (gitignored)
+    // Predict in DEVLOG.md BEFORE you read the reference, then implement.
+    //
+    // BUILD (the equations are in this function's doc-comment above):
+    //  1. From `trim`: airspeed `va = |velocity|`; the trim `attitude`; the trim
+    //     angle of attack `alpha_trim = atan2(w, u)` of the body velocity
+    //     `vb = attitude⁻¹ · velocity`; and the trim throttle.
+    //  2. A closure `f(alpha, q) -> (alpha_dot, q_dot)` evaluating the REAL model:
+    //       • body velocity `vb = (va·cos α, 0, va·sin α)`; a `State13` with
+    //         `velocity = attitude·vb`, the trim `attitude`, `angular_rate=(0,q,0)`.
+    //       • controls: aileron = rudder = 0, `elevator = elevator_of(alpha, q)`,
+    //         trim throttle.
+    //       • `fixedwing_wrench(.., wind = 0, gravity = 0)` ⇒ `force_world` is the
+    //         pure aero+thrust force; `f_body = attitude⁻¹ · force_world`.
+    //       • `q_dot = rigid_body_deriv(..).d_angular_rate.y`.
+    //       • `alpha_dot = q + (u·f_body.z − w·f_body.x) / (m·va²)`.
+    //  3. Forward-difference a 2×2 Jacobian A about `(alpha_trim, 0)` (step ~1e-6).
+    //  4. Eigenvalues from `λ² − tr·λ + det = 0` (tr = A00+A11, det = A00·A11 −
+    //     A01·A10): a real pair if the discriminant ≥ 0, else complex conjugates.
+    //     Return `ShortPeriodModes { eig: [(re, im); 2] }`.
+    //
+    // WHY: this is the airframe's pitch stability reduced to two numbers. The sign
+    // of the dominant real part IS the demo — `> 0` is the relaxed airframe
+    // diverging open-loop; `< 0` is the fly-by-wire holding it. Driving it through
+    // `elevator_of` makes the eigenvalues a faithful check of the real FCS.
+    // └─────────────────────────────────────────────────────────────────────────┘
+    let _ = (p, trim, &mut elevator_of);
+    todo!("implement short_period_modes — see reference/dynamics_fixedwing.rs.reference")
 }
 
 #[cfg(test)]
@@ -618,6 +723,122 @@ mod tests {
         assert!(
             (out.angular_rate - s.angular_rate).norm() > 1e-3,
             "Jxz should couple axes"
+        );
+    }
+
+    fn fighter() -> FixedWingParams {
+        FixedWingParams::fighter_relaxed()
+    }
+
+    // The relaxed-stability fighter is the Aerosonde with ONE coefficient flipped
+    // (the static margin): aft CG, `cm_alpha` positive, everything else identical.
+    #[test]
+    fn fighter_is_aerosonde_with_aft_cg() {
+        let (a, f) = (aero(), fighter());
+        assert!(f.cm_alpha > 0.0, "relaxed stability: cm_alpha must be ≥ 0");
+        assert_eq!(a.mass, f.mass, "same mass");
+        assert_eq!(a.cl_alpha, f.cl_alpha, "same lift slope");
+        assert_eq!(a.cm_de, f.cm_de, "same elevator authority");
+        assert_eq!(a.cm_q, f.cm_q, "same pitch damping");
+        assert_eq!(a.inertia, f.inertia, "same inertia");
+    }
+
+    // An unstable airframe is still an *equilibrium*: the Newton trim converges.
+    #[test]
+    fn fighter_still_trims() {
+        let p = fighter();
+        let tr = trim(&p, 25.0, 0.0).expect("relaxed-stability airframe still trims");
+        let d = deriv(&tr.state, &p, &tr.controls);
+        let a_body = tr.state.attitude.inverse() * d.d_velocity;
+        assert!(a_body.x.abs() < 1e-6 && a_body.z.abs() < 1e-6, "force trim");
+        assert!(d.d_angular_rate.y.abs() < 1e-6, "pitch-accel trim");
+    }
+
+    // --- Eigenvalue proof (the "not faked" check) ---
+    // OPEN loop: the fighter's short period has a right-half-plane pole, and its
+    // time-to-double is sub-second (faster than any human pitch reflex).
+    #[test]
+    fn fighter_open_loop_short_period_diverges() {
+        let p = fighter();
+        let tr = trim(&p, 25.0, 0.0).unwrap();
+        let modes = short_period_modes(&p, &tr, |_, _| tr.controls.elevator);
+        assert!(
+            modes.max_real() > 0.0,
+            "open-loop short period must be unstable (RHP): {:?}",
+            modes.eig
+        );
+        let t2 = modes.time_to_double();
+        assert!(
+            t2 > 0.0 && t2 < 1.0,
+            "time-to-double {t2} s should be sub-second"
+        );
+    }
+
+    // The control case: the conventional Aerosonde's short period is in the LHP.
+    #[test]
+    fn aerosonde_open_loop_short_period_is_stable() {
+        let p = aero();
+        let tr = trim(&p, 25.0, 0.0).unwrap();
+        let modes = short_period_modes(&p, &tr, |_, _| tr.controls.elevator);
+        assert!(
+            modes.is_stable(),
+            "stable UAV's short period must be in the LHP: {:?}",
+            modes.eig
+        );
+    }
+
+    // CLOSED loop: folding the fly-by-wire SAS feedback
+    //   δe = δe_trim + Kα·(α − α_trim) + Kq·q
+    // (the same gains `FbwConfig::fighter` uses) into the state matrix pulls both
+    // eigenvalues into the LHP. This proves the *physics* — that this feedback
+    // shape stabilizes — with explicit gains; `fsim-control` additionally drives
+    // `short_period_modes` with the **real** `FlyByWire::step` so the proof tracks
+    // the shipped law and its gain schedule, not hand-coded constants.
+    #[test]
+    fn fbw_feedback_stabilizes_the_short_period() {
+        let p = fighter();
+        let tr = trim(&p, 25.0, 0.0).unwrap();
+        let (k_alpha, k_q) = (1.0, 0.2);
+        let de_trim = tr.controls.elevator;
+        let vb = tr.state.attitude.inverse() * tr.state.velocity;
+        let alpha_trim = Float::atan2(vb.z, vb.x);
+        let modes = short_period_modes(&p, &tr, |a, q| {
+            de_trim + k_alpha * (a - alpha_trim) + k_q * q
+        });
+        assert!(
+            modes.is_stable(),
+            "FBW SAS must pull the short period into the LHP: {:?}",
+            modes.eig
+        );
+    }
+
+    // --- Behavioural divergence: the same pitch nudge that the stable UAV damps
+    // makes the relaxed-stability airframe run away. An A/B comparison (rather
+    // than an absolute threshold) keeps it robust to the nonlinear stall that
+    // eventually caps the runaway rate. ---
+    #[test]
+    fn fighter_diverges_where_aerosonde_recovers() {
+        let kick = 0.05; // a gentle 0.05 rad/s pitch kick
+        let departure = |p: &FixedWingParams| {
+            let tr = trim(p, 25.0, 0.0).unwrap();
+            let mut s = tr.state;
+            s.angular_rate.y += kick;
+            // Controls frozen at trim — no control law, just the airframe.
+            step_open(p, s, &tr.controls, 1200).angular_rate.y.abs() // 1.2 s
+        };
+        let stable = departure(&aero());
+        let relaxed = departure(&fighter());
+        assert!(
+            stable < kick,
+            "stable UAV should damp the kick: q = {stable}"
+        );
+        assert!(
+            relaxed > 4.0 * kick,
+            "relaxed airframe should diverge: q = {relaxed}"
+        );
+        assert!(
+            relaxed > 8.0 * stable,
+            "relaxed ({relaxed}) must run away far past the stable case ({stable})"
         );
     }
 }

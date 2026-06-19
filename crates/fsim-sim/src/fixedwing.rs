@@ -9,8 +9,13 @@
 
 use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
 use crate::guidance::Waypoint;
-use fsim_control::{FixedWingAutopilot, FixedWingConfig, FixedWingController, FixedWingSetpoint};
-use fsim_core::{planet, EstState, FixedWingControls, Real, State13, Tick, Vec3, DEFAULT_DT};
+use fsim_control::{
+    FbwConfig, FixedWingAutopilot, FixedWingConfig, FixedWingController, FixedWingSetpoint,
+    FlyByWire,
+};
+use fsim_core::{
+    planet, EstState, FixedWingControls, Real, State13, StickInput, Tick, Vec3, DEFAULT_DT, GRAVITY,
+};
 use fsim_dynamics::{fixedwing_wrench, rigid_body_deriv, trim, FixedWingParams, Integrator, Rk4};
 
 /// One logged fixed-wing sample.
@@ -27,10 +32,17 @@ pub struct FwSample {
 pub struct FwSimConfig {
     pub params: FixedWingParams,
     pub autopilot: FixedWingConfig,
+    /// Fly-by-wire tuning + trim references for manual (piloted) flight.
+    pub fbw: FbwConfig,
     pub dt: Real,
     pub control_rate: Real,
     pub initial: State13,
     pub setpoint: FixedWingSetpoint,
+    /// Start the sim already under manual (pilot-stick) control rather than the
+    /// autopilot. The relaxed-stability fighter uses this.
+    pub start_manual: bool,
+    /// Initial state of the fly-by-wire toggle when `start_manual`.
+    pub fbw_enabled: bool,
 }
 
 impl FwSimConfig {
@@ -47,13 +59,46 @@ impl FwSimConfig {
     /// begins in level cruise tangent to the planet, flying North.
     pub fn aerosonde_at(alt: Real) -> Self {
         let params = FixedWingParams::aerosonde();
-        let tr = trim(&params, 25.0, 0.0).expect("Aerosonde 25 m/s level trim converges");
+        Self::from_trim(params, alt, false)
+    }
+
+    /// The **relaxed-stability fighter** under manual fly-by-wire control,
+    /// spawned in level trimmed flight at altitude `alt` \[m\]. It starts with the
+    /// FCS **on** (flyable); toggling it off lets the unstable airframe diverge.
+    /// Plenty of altitude is sensible so the tumble has room when the FCS is off.
+    pub fn fighter_manual(alt: Real) -> Self {
+        let params = FixedWingParams::fighter_relaxed();
+        Self::from_trim(params, alt, true)
+    }
+
+    /// The fighter at a default 300 m.
+    pub fn fighter() -> Self {
+        Self::fighter_manual(300.0)
+    }
+
+    /// Build a config by solving 25 m/s level trim for `params`, placing it on
+    /// the sphere at `alt`, and deriving the fly-by-wire trim references from the
+    /// same trim. `manual` selects whether the sim starts piloted (FCS on).
+    fn from_trim(params: FixedWingParams, alt: Real, manual: bool) -> Self {
+        let tr = trim(&params, 25.0, 0.0).expect("25 m/s level trim converges");
         let mut autopilot = FixedWingConfig::aerosonde();
         autopilot.trim_throttle = tr.controls.throttle;
+        // Trim angle of attack (flat local trim, before placement on the sphere).
+        let vb = tr.state.attitude.inverse() * tr.state.velocity;
+        let alpha_trim = vb.z.atan2(vb.x);
+        let fbw = FbwConfig::fighter(
+            alpha_trim,
+            tr.controls.elevator,
+            tr.controls.throttle,
+            25.0,
+            params.rho,
+            params.limits,
+        );
         let initial = place_on_sphere(&tr.state, planet::home_pci(alt));
         Self {
             params,
             autopilot,
+            fbw,
             dt: DEFAULT_DT,
             control_rate: 100.0,
             initial,
@@ -62,6 +107,8 @@ impl FwSimConfig {
                 altitude: alt,
                 course: 0.0,
             },
+            start_manual: manual,
+            fbw_enabled: true,
         }
     }
 }
@@ -96,12 +143,19 @@ fn local_est_from_pci(s: &State13) -> EstState {
     }
 }
 
-/// How [`FwSim::step`] derives the setpoint each control gate.
+/// How [`FwSim::step`] produces the control surfaces each control gate.
 enum FwMode {
-    /// Hold the externally-set [`FixedWingSetpoint`] (the original behaviour).
+    /// Hold the externally-set [`FixedWingSetpoint`] via the autopilot.
     Setpoint,
     /// Follow a waypoint route, recomputing the setpoint from truth each gate.
     Route(FwGuidance),
+    /// Human pilot: a fly-by-wire law turns the [`StickInput`] into surfaces,
+    /// with a runtime on/off toggle (`fbw_enabled`). Off ⇒ direct passthrough.
+    Manual {
+        fbw: FlyByWire,
+        stick: StickInput,
+        fbw_enabled: bool,
+    },
 }
 
 /// A deterministic fixed-wing simulator: autopilot → aero wrench → RK4.
@@ -114,9 +168,11 @@ pub struct FwSim {
     truth: State13,
     params: FixedWingParams,
     autopilot: Box<dyn FixedWingController>,
+    /// Fly-by-wire tuning (used to build the manual mode on demand).
+    fbw_cfg: FbwConfig,
     /// Last setpoint actually applied to the autopilot (logged each sample).
     setpoint: FixedWingSetpoint,
-    /// Setpoint-hold vs route-follow (selects how `step` builds the setpoint).
+    /// Setpoint-hold / route-follow / manual (selects how `step` builds surfaces).
     mode: FwMode,
     controls: FixedWingControls,
     dt: Real,
@@ -130,12 +186,22 @@ pub struct FwSim {
 impl FwSim {
     pub fn new(cfg: FwSimConfig) -> Self {
         let control_period = ((1.0 / (cfg.control_rate * cfg.dt)).round() as u64).max(1);
+        let mode = if cfg.start_manual {
+            FwMode::Manual {
+                fbw: FlyByWire::new(cfg.fbw),
+                stick: StickInput::neutral(),
+                fbw_enabled: cfg.fbw_enabled,
+            }
+        } else {
+            FwMode::Setpoint
+        };
         Self {
             truth: cfg.initial,
             params: cfg.params,
             autopilot: Box::new(FixedWingAutopilot::new(cfg.autopilot)),
+            fbw_cfg: cfg.fbw,
             setpoint: cfg.setpoint,
-            mode: FwMode::Setpoint,
+            mode,
             controls: FixedWingControls::zero(),
             dt: cfg.dt,
             control_period,
@@ -165,21 +231,87 @@ impl FwSim {
         self.mode = FwMode::Route(g);
     }
 
+    /// Switch to manual (piloted) control: a fly-by-wire law maps the pilot's
+    /// stick to surfaces. `fbw_enabled` is the initial state of the FCS toggle.
+    /// Cancels any route or held setpoint.
+    pub fn enter_manual(&mut self, fbw_enabled: bool) {
+        self.mode = FwMode::Manual {
+            fbw: FlyByWire::new(self.fbw_cfg),
+            stick: StickInput::neutral(),
+            fbw_enabled,
+        };
+    }
+
+    /// Update the pilot's stick demand. No-op unless in manual mode.
+    pub fn set_stick(&mut self, s: StickInput) {
+        if let FwMode::Manual { stick, .. } = &mut self.mode {
+            *stick = s;
+        }
+    }
+
+    /// Set the fly-by-wire toggle (on = stabilized/flyable, off = passthrough).
+    /// No-op unless in manual mode.
+    pub fn set_fbw(&mut self, on: bool) {
+        if let FwMode::Manual { fbw_enabled, .. } = &mut self.mode {
+            *fbw_enabled = on;
+        }
+    }
+
+    /// True when flying under manual control.
+    pub fn is_manual(&self) -> bool {
+        matches!(self.mode, FwMode::Manual { .. })
+    }
+
+    /// True when manual *and* the fly-by-wire FCS is engaged.
+    pub fn fbw_on(&self) -> bool {
+        matches!(&self.mode, FwMode::Manual { fbw_enabled, .. } if *fbw_enabled)
+    }
+
     /// Active waypoint index when route-following, else `None`.
     pub fn waypoint_index(&self) -> Option<usize> {
         match &self.mode {
             FwMode::Route(g) => g.current_index(),
-            FwMode::Setpoint => None,
+            FwMode::Setpoint | FwMode::Manual { .. } => None,
         }
     }
 
     /// True once a route has captured its final waypoint (always `false` in
-    /// setpoint mode).
+    /// setpoint / manual mode).
     pub fn route_complete(&self) -> bool {
         match &self.mode {
             FwMode::Route(g) => g.is_complete(),
-            FwMode::Setpoint => false,
+            FwMode::Setpoint | FwMode::Manual { .. } => false,
         }
+    }
+
+    /// Angle of attack \[rad\] from the current truth (still air ⇒ airspeed =
+    /// ground speed): the angle of the body-frame velocity below the body x-axis.
+    pub fn alpha(&self) -> Real {
+        let vb = self.truth.attitude.inverse() * self.truth.velocity;
+        vb.z.atan2(vb.x)
+    }
+
+    /// Aerodynamic load factor `n` (in g): the body-normal specific force from
+    /// aero + thrust, divided by standard gravity. ~1 in level cruise, higher in
+    /// a hard pull. Excludes gravity (the wrench is evaluated with `g = 0`).
+    pub fn load_factor(&self) -> Real {
+        let w = fixedwing_wrench(
+            &self.truth,
+            &self.params,
+            &self.controls,
+            Vec3::zeros(),
+            Vec3::zeros(),
+        );
+        let f_body = self.truth.attitude.inverse() * w.force_world;
+        -f_body.z / (self.params.mass * GRAVITY)
+    }
+
+    /// Inject a body-frame angular-rate perturbation into the truth state — an
+    /// external upset (gust, disturbance). Used to excite the airframe
+    /// independently of the pilot's stick, e.g. to test that the FCS recovers
+    /// from an upset while the open-loop airframe diverges from the same one.
+    pub fn nudge_angular_rate(&mut self, delta_body: Vec3) {
+        self.truth.angular_rate += delta_body;
     }
 
     /// The active commanded setpoint (route-derived when following a route).
@@ -229,17 +361,26 @@ impl FwSim {
     /// Advance one base step (control runs on its own slower gate).
     pub fn step(&mut self) {
         if self.tick.is_multiple_of(self.control_period) {
-            // Route mode: derive the setpoint from truth (perfect feedback).
+            let control_dt = self.control_period as Real * self.dt;
+            // Truth feedback, rotated into the local horizon (sphere).
+            let est = local_est_from_pci(&self.truth);
+            // Route mode: derive the setpoint from truth (perfect feedback) first.
             if let FwMode::Route(g) = &mut self.mode {
                 self.setpoint = g.update(self.truth.position);
             }
-            // Truth feedback, rotated into the local horizon (sphere).
-            let est = local_est_from_pci(&self.truth);
-            let control_dt = self.control_period as Real * self.dt;
-            self.controls = self
-                .autopilot
-                .step(&est, &self.setpoint, control_dt)
-                .clamp(&self.params.limits);
+            self.controls = match &mut self.mode {
+                // Pilot-in-the-loop: fly-by-wire (or passthrough) from the stick.
+                FwMode::Manual {
+                    fbw,
+                    stick,
+                    fbw_enabled,
+                } => fbw.step(&est, stick, control_dt, *fbw_enabled),
+                // Autopilot (setpoint or route-derived).
+                FwMode::Setpoint | FwMode::Route(_) => {
+                    self.autopilot.step(&est, &self.setpoint, control_dt)
+                }
+            }
+            .clamp(&self.params.limits);
         }
 
         let p = &self.params;
@@ -634,5 +775,153 @@ mod tests {
         assert_eq!(sim.waypoint_index(), None, "route not cancelled");
         sim.run_headless(20_000);
         assert!((sim.altitude() - 100.0).abs() < 5.0);
+    }
+
+    // --- Manual / fly-by-wire ---
+
+    /// Hit the manually-flown fighter with an identical **external** pitch upset
+    /// (independent of the stick) and report `(worst body-rate, final body-rate)`
+    /// over `secs` seconds. The external kick is what makes the FCS *do work* — an
+    /// FBW that ignored the airframe would fail to recover.
+    fn fighter_upset_response(fbw_on: bool, secs: f64) -> (Real, Real) {
+        let mut sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+        sim.set_fbw(fbw_on);
+        sim.set_stick(StickInput {
+            pitch: 0.0,
+            roll: 0.0,
+            yaw: 0.0,
+            throttle: 0.55, // near the trim throttle so it holds airspeed
+        });
+        sim.step(); // one gate so the throttle is applied
+        sim.nudge_angular_rate(Vec3::new(0.0, 0.3, 0.0)); // 0.3 rad/s pitch upset
+        let steps = (secs / DEFAULT_DT) as usize;
+        let mut worst = 0.0_f64;
+        for _ in 0..steps {
+            sim.step();
+            worst = worst.max(sim.truth().angular_rate.norm());
+        }
+        (worst, sim.truth().angular_rate.norm())
+    }
+
+    // The headline toggle, headless: an external 0.3 rad/s pitch upset is ARRESTED
+    // and damped back to trim with the FCS ON, but RUNS AWAY with it OFF. The
+    // external kick (not a stick input) is essential — it forces the FCS to
+    // actually stabilize rather than sit at an undisturbed equilibrium.
+    #[test]
+    fn fighter_fbw_recovers_from_upset_off_diverges() {
+        let (on_worst, on_final) = fighter_upset_response(true, 8.0);
+        let (off_worst, _) = fighter_upset_response(false, 4.0);
+        // FBW ON: the 0.3 rad/s upset is arrested (never amplified) and decays
+        // well below its initial size — the short period is damped. (A small
+        // residual remains: the lightly-damped phugoid on the curved planet.)
+        assert!(
+            on_worst < 0.6,
+            "FBW should bound the upset, not amplify it: worst {on_worst} rad/s"
+        );
+        assert!(
+            on_final < 0.2 && on_final < on_worst,
+            "FBW should damp the upset down from its peak: final {on_final}, worst {on_worst}"
+        );
+        // FBW OFF: the identical upset runs away.
+        assert!(
+            off_worst > 1.5,
+            "no FBW ⇒ the same upset diverges: worst {off_worst} rad/s"
+        );
+        assert!(
+            off_worst > 5.0 * on_worst,
+            "off ({off_worst}) must run away far past on ({on_worst})"
+        );
+    }
+
+    // The fighter starts in manual with the FCS engaged.
+    #[test]
+    fn fighter_starts_manual_fbw_on() {
+        let sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+        assert!(sim.is_manual(), "fighter should start piloted");
+        assert!(sim.fbw_on(), "FCS should start engaged");
+    }
+
+    // The HUD readouts: at spawn the fighter sits at its trim angle of attack and
+    // ~1 g (level cruise); both getters must reflect that.
+    #[test]
+    fn fighter_alpha_and_load_factor_readouts() {
+        let sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+        // Trim AoA for the fighter at 25 m/s level is ≈ 0.1 rad.
+        assert!(
+            (0.05..0.15).contains(&sim.alpha()),
+            "AoA at spawn should be near trim: {}",
+            sim.alpha()
+        );
+        // Level cruise ⇒ lift ≈ weight ⇒ load factor ≈ 1 g.
+        assert!(
+            (sim.load_factor() - 1.0).abs() < 0.25,
+            "load factor in level cruise should be ~1 g: {}",
+            sim.load_factor()
+        );
+    }
+
+    // A pitch command under FBW produces a body-frame pitch-rate response (the
+    // aircraft tracks the stick) without diverging.
+    #[test]
+    fn fbw_tracks_a_pitch_command() {
+        let mut sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+        sim.set_stick(StickInput {
+            pitch: 0.6, // pull back
+            roll: 0.0,
+            yaw: 0.0,
+            throttle: 0.55,
+        });
+        let mut peak_q = 0.0_f64;
+        for _ in 0..1500 {
+            sim.step();
+            // angular_rate is already body-frame (FRD) — read q directly.
+            peak_q = peak_q.max(sim.truth().angular_rate.y);
+        }
+        assert!(
+            peak_q > 0.05,
+            "pull-back should command a nose-up rate: {peak_q}"
+        );
+        assert!(
+            sim.truth().angular_rate.norm() < 1.0,
+            "but stay bounded (not tumbling): {}",
+            sim.truth().angular_rate.norm()
+        );
+    }
+
+    // T-ManualDeterminism: a scripted stick + toggle sequence is reproducible
+    // (manual flight adds no RNG to the truth path).
+    #[test]
+    fn manual_is_deterministic() {
+        let run = || {
+            let mut sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+            for k in 0..6000u64 {
+                sim.set_stick(StickInput {
+                    pitch: if k < 1000 { 0.5 } else { 0.0 },
+                    roll: if (2000..3000).contains(&k) { 0.7 } else { 0.0 },
+                    yaw: 0.0,
+                    throttle: 0.55,
+                });
+                if k == 4000 {
+                    sim.set_fbw(false); // flip the toggle mid-run
+                }
+                sim.step();
+            }
+            *sim.truth()
+        };
+        let a = run();
+        let b = run();
+        // Finite, so the bit-equality below compares real numbers (two diverging
+        // runs that both overflowed to ±inf would compare equal and hide a bug).
+        assert!(
+            a.position
+                .iter()
+                .chain(a.angular_rate.iter())
+                .all(|x| x.is_finite()),
+            "state should stay finite over the run"
+        );
+        assert_eq!(a.position, b.position);
+        assert_eq!(a.velocity, b.velocity);
+        assert_eq!(a.attitude, b.attitude);
+        assert_eq!(a.angular_rate, b.angular_rate);
     }
 }

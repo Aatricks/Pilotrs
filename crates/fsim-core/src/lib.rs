@@ -32,7 +32,7 @@ mod state;
 
 pub use messages::{
     BaroMeas, ControlLimits, CtrlCmd, EstState, FixedWingControls, GpsMeas, ImuMeas, MagMeas,
-    Setpoint, Wrench,
+    Setpoint, StickInput, Wrench,
 };
 pub use state::{attitude_kinematics, State13, StateDeriv, STATE_DIM};
 

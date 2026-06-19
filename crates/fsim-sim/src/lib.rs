@@ -40,5 +40,6 @@ pub use telemetry::{Telemetry, TelemetrySample};
 
 // Re-export the pieces a front-end (viz) commonly needs.
 pub use fsim_core::{
-    planet, CtrlCmd, EstState, FixedWingControls, Quat, Real, Setpoint, State13, Vec3, GRAVITY,
+    planet, CtrlCmd, EstState, FixedWingControls, Quat, Real, Setpoint, State13, StickInput, Vec3,
+    GRAVITY,
 };
