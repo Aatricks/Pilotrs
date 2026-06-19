@@ -16,7 +16,7 @@
 //! offsets, so cruise needs no exact feed-forward beyond the throttle.
 
 use crate::Pid;
-use fsim_core::{ControlLimits, EstState, FixedWingControls, Real, GRAVITY};
+use fsim_core::{ControlLimits, EstState, FixedWingControls, Real};
 use num_traits::Float;
 
 /// What the fixed-wing autopilot is asked to hold.
@@ -142,7 +142,11 @@ impl FixedWingController for FixedWingAutopilot {
         // --- LATERAL: course → bank → aileron, plus a coordinated yaw damper ---
         let phi_cmd = self.course_pid.step(wrap_pi(sp.course - chi), dt);
         let aileron = self.cfg.kp_phi * (phi_cmd - phi) - self.cfg.kd_phi * p;
-        let r_coord = (GRAVITY / va_s) * Float::tan(phi) * Float::cos(theta);
+        // Local gravity (inverse-square at this altitude) so the coordinated-turn
+        // feed-forward is correct on the sphere — `h` is the altitude above the
+        // surface (flat earth → `gravity_magnitude(0) = g0`, unchanged).
+        let r_coord =
+            (fsim_core::planet::gravity_magnitude(h) / va_s) * Float::tan(phi) * Float::cos(theta);
         let rudder = self.cfg.kr * (r - r_coord);
 
         // --- LONGITUDINAL: altitude → pitch → elevator; airspeed → throttle ---

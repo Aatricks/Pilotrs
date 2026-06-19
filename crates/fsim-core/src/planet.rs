@@ -72,6 +72,16 @@ pub fn altitude_of(p: Vec3) -> Real {
     p.norm() - PLANET_RADIUS
 }
 
+/// Magnitude of gravity at altitude `alt` above the surface \[m/s²\] — the
+/// inverse-square field (`= GRAVITY` at the surface, ~12 % weaker at 400 m on
+/// this tiny planet). For controllers that need the local `|g|` (e.g. the
+/// fixed-wing's coordinated-turn rate) without forming the full vector.
+#[inline]
+pub fn gravity_magnitude(alt: Real) -> Real {
+    let r = PLANET_RADIUS + alt;
+    PLANET_MU / (r * r)
+}
+
 /// The local NED basis `(north, east, down)` at PCI position `p`, as unit PCI
 /// vectors. `down = −p̂`; `north` is the polar axis (PCI `+z`) projected into the
 /// local tangent plane (pointing toward the North pole); `east = down × north`.

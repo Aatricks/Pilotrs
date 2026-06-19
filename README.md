@@ -19,7 +19,7 @@ truth ─▶ SENSORS ──────▶ ESTIMATOR ─────────
 The controller and estimator **only** consume sensor-derived estimates — that's
 what makes the estimate-vs-truth plots meaningful.
 
-## Status: M6 (fixed-wing) complete — the roadmap is done
+## Status: M7 — a spherical 1/1000-Earth world (roadmap + beyond)
 
 A second airframe — a **fixed-wing aircraft** — now flies on the *same*
 integrator, `State13`, conventions, and rigid-body equations of motion as the
@@ -54,8 +54,16 @@ an aerodynamic plant + trim + its own autopilot:
   `rigid_body_deriv` verbatim (the full non-diagonal `Jxz` inertia and all) —
   only the wrench and the autopilot differ. The Aerosonde climbs, turns, and
   changes speed under autopilot, all deterministic and headless.
+- **M7 — a spherical world**: the planet becomes a **1/1000-scale Earth**
+  (radius 6371 m). The fixed-wing flies in a **planet-centered inertial frame**
+  with **radial inverse-square gravity**; its autopilot is unchanged — it just
+  reads a *local horizon* derived from the current position each step (attitude
+  composed with `q_ned_from_pci`, altitude = `|p| − R`, local course), so "level"
+  follows the curve and routes are **great circles**. The quad stays in a flat
+  local-tangent frame at home (curvature there is ~1e-8 rad). The viewer draws
+  the whole planet as a displaced globe with a local-radial follow-camera.
 
-158 tests pass across the workspace, the core ring builds `no_std`, and runs are
+169 tests pass across the workspace, the core ring builds `no_std`, and runs are
 bit-for-bit deterministic.
 
 ## Workspace layout
@@ -82,10 +90,16 @@ The `core → … → control` crates form a **`no_std`-clean flight-control rin
 - **Attitude:** `q_{world←body}`, Hamilton convention, renormalized every step.
 - **Angular rate** is in the body frame (what the gyro reads).
 
+> M7 note: the quad and all the flat-earth subsystems keep these conventions
+> verbatim. The fixed-wing's "world" is instead a **planet-centered inertial
+> (PCI)** frame (`fsim_core::planet`); the *local* NED above is then a tangent
+> frame derived from the current position — the attitude/EOM are frame-agnostic,
+> so only gravity (now radial) and the navigation maths (great circles) differ.
+
 ## Running
 
 ```bash
-cargo test  --workspace                          # the full test suite (158 tests)
+cargo test  --workspace                          # the full test suite (169 tests)
 cargo run   -p fsim-sim --example headless        # INS flies a square mission + M2 contrast
 cargo run   -p fsim-sim --release --example montecarlo     # parallel Monte-Carlo (faster-than-real-time)
 cargo run   -p fsim-sim --release --example pid_vs_lqr      # PID vs LQR step-response + mission A/B
@@ -95,18 +109,18 @@ cargo run   -p fsim-viz --release                 # the interactive 3D viewer (s
 ```
 
 In the viewer: an **airframe toggle** flies either the quad or the fixed-wing
-over a **procedural elevation terrain** — a ~4.8 km island of slope-shaded
-**mountain ranges** rising ~320 m (water → shore → grass → rock → snow) ringed by
-an ocean horizon, with a flat **home airfield clearing** at the origin so an
-aircraft spawned at the datum always sits *above* the ground. The quad flies its
-mission inside that clearing; the fixed-wing cruises *above* the peaks. The
-**Route planner** minimap is a top-down shaded-relief map — click to drop
-waypoints, drag to move, right-click to remove — and **Fly route** dispatches it
-to the active aircraft (the quad as an INS waypoint mission, the fixed-wing as
-vector-field line guidance, tuned so the ground track converges onto each leg
-smoothly instead of snaking). The larger world gives the fixed-wing's ~110 m turn
-radius room to actually track a hand-drawn route. The camera follows the aircraft
-as it ranges over the map. The **Flight controls** window switches the estimator (CF / MEKF / INS),
+over a **1/1000-scale spherical Earth** (M7) — a ~6.4 km-radius "tiny planet"
+(~40 km around) with procedural **mountain ranges** rising ~320 m
+(water → shore → grass → rock → snow) and a flat **home airfield clearing**. The
+fixed-wing flies the planet with **full spherical physics** (gravity points to
+the core; "level" follows the curve) and **great-circle routes**; the quad flies
+its mission in a flat local-tangent patch at home (it never strays far enough for
+curvature to matter). The follow-camera orbits the globe with a local-radial up
+vector. The **Route planner** minimap is a top-down tangent map at home — click
+to drop waypoints, drag to move, right-click to remove — and **Fly route**
+dispatches it to the active aircraft (the quad as an INS waypoint mission, the
+fixed-wing as a great-circle route, tuned so the ground track converges onto each
+leg smoothly instead of snaking). The **Flight controls** window switches the estimator (CF / MEKF / INS),
 the inner controller (PID / LQR), and sets the attitude / cruise setpoint; the
 telemetry window plots estimate-vs-truth-vs-setpoint (quad) or airspeed /
 altitude / course (fixed-wing).

@@ -255,7 +255,7 @@ impl OrbitCam {
                     handled: false,
                     ..
                 } => {
-                    self.dist = (self.dist * (1.0 - delta.1 * 0.0015)).clamp(25.0, 9000.0);
+                    self.dist = (self.dist * (1.0 - delta.1 * 0.0015)).clamp(40.0, 6000.0);
                 }
                 _ => {}
             }
@@ -365,13 +365,16 @@ fn main() {
         vec3(r_planet, 0.0, 0.0),
         vec3(1.0, 0.0, 0.0),
         degrees(45.0),
-        5.0,
+        // near 10 m (the orbit min distance is 40 m); far 20 km clears the whole
+        // planet (the zoom-out is bounded to 6 km so the camera core-distance stays
+        // under ~13 km and the back of the globe — ~R beyond it — is never clipped).
+        10.0,
         20000.0,
     );
     let mut orbit = OrbitCam {
         az: std::f32::consts::PI, // behind the aircraft, looking North
         el: 0.5,                  // ~29° above the local horizon
-        dist: 900.0,
+        dist: 1200.0,
     };
 
     let ambient = AmbientLight::new(&context, 0.5, Srgba::WHITE);
@@ -388,9 +391,11 @@ fn main() {
         terrain.material(&context),
     );
 
-    // Sea: a smooth sphere at sea level. Land pokes through where the terrain
-    // rises above it; deep valleys sit below it and read as water/ocean.
-    let sea_radius = r_planet + terrain.sea_level;
+    // Sea: a smooth sphere just below sea level. Land pokes through where the
+    // terrain rises above it; deep valleys sit below it and read as water/ocean.
+    // The −1 m offset keeps it from coinciding exactly with the terrain surface
+    // at the shoreline (height == sea_level), which would z-fight.
+    let sea_radius = r_planet + terrain.sea_level - 1.0;
     let mut sea = Gm::new(
         Mesh::new(&context, &CpuMesh::sphere(48)),
         opaque(&context, 30, 78, 130),

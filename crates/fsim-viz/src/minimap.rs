@@ -185,7 +185,7 @@ impl Minimap {
             .show(ctx, |ui| {
                 let side = 320.0_f32;
                 // CRITICAL: click_and_drag so egui "uses the pointer" while the
-                // user interacts (so OrbitControl skips the events — see the
+                // user interacts (so the OrbitCam skips the events — see the
                 // module-level event-consumption note in main.rs).
                 let (resp, painter) =
                     ui.allocate_painter(Vec2::new(side, side), Sense::click_and_drag());

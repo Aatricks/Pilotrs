@@ -1,17 +1,26 @@
 //! # Procedural terrain
 //!
-//! A deterministic, seed-driven height field for the viewer's ground, plus a
-//! helper that bakes it into a single coloured, lit [`three_d::CpuMesh`].
+//! A deterministic, seed-driven height field for the viewer's ground, plus
+//! helpers that bake it into a single coloured, lit [`three_d::CpuMesh`].
 //!
-//! ## Frame convention (matches `main.rs`)
+//! Two sampling domains share one noise/colour recipe:
 //!
-//! The scene is drawn directly in the simulator's **NED** world frame
-//! (x = North, y = East, z = Down). Altitude is `-z`, so a hill that rises
-//! `h` metres above the `z = 0` datum sits at world `z = -h`. The camera's up
-//! vector is world `-z`. The terrain mesh therefore places each vertex at
-//! `(n, e, -height(n, e))` and is wound so its lit faces point up (towards
-//! `-z`), i.e. the same direction the existing [`DirectionalLight`] (travelling
-//! `+z`, downward) illuminates.
+//! * **Spherical (M7, the live path):** [`Terrain::height_dir`] /
+//!   [`Terrain::color_dir`] / [`Terrain::sphere_mesh`] sample elevation as a
+//!   function of a 3D *direction* on the planet (3D-domain fBm, no lat/lon seam)
+//!   and displace a globe of radius `R = 6371 m` radially. This is what the
+//!   viewer renders.
+//! * **Flat (legacy):** [`Terrain::height`] / [`Terrain::build_mesh`] — the
+//!   original flat heightmap, retained as a reference and for the unit tests
+//!   that exercise the shared noise/colour/clearing logic.
+//!
+//! ## Flat-path frame convention (the legacy `build_mesh`)
+//!
+//! The flat heightmap is in **NED** (x = North, y = East, z = Down): a hill that
+//! rises `h` metres above the `z = 0` datum sits at world `z = -h`, and the mesh
+//! is wound so its lit faces point up (toward `-z`). The spherical mesh instead
+//! lives in the planet-centered (PCI) frame with outward-facing, radially
+//! displaced vertices.
 //!
 //! ## Determinism
 //!
@@ -52,10 +61,10 @@ use three_d::{
 pub struct Terrain {
     /// Hash seed. Same seed ⇒ identical field.
     pub seed: u32,
-    /// Half the map side length, in metres. The map covers
-    /// `[-half_extent, half_extent]²`. ~2.4 km ⇒ a ~4.8 km square — large enough
-    /// that a fixed-wing's ~110 m turn radius can actually track a hand-drawn
-    /// route, and far enough that the world doesn't read as a tiny patch.
+    /// Half-side of the **minimap's local tangent map** at home, in metres
+    /// (`±half_extent` N/E). ~2.4 km ⇒ a ~4.8 km window onto the planet around
+    /// the home airfield — enough room for a fixed-wing's ~110 m turn radius to
+    /// track a hand-drawn route. (Also the extent of the legacy flat `build_mesh`.)
     pub half_extent: f32,
     /// Peak elevation **above** the `z = 0` datum, in metres (the tallest
     /// ridges). The whole field is bounded above by this.
@@ -206,9 +215,11 @@ impl Terrain {
         }
     }
 
-    /// Elevation in metres **above the `z = 0` datum** at world `(n, e)`
-    /// (North, East). Deterministic and at least C0. Range is bounded by
-    /// `[min_height(), max_height()]` exactly.
+    /// **(Legacy flat path.)** Elevation in metres above the `z = 0` datum at
+    /// world `(n, e)` (North, East). The live viewer uses the spherical
+    /// [`height_dir`](Self::height_dir) instead; this flat field is kept for the
+    /// unit tests that exercise the shared noise / clearing logic. Deterministic,
+    /// at least C0, bounded by `[min_height(), max_height()]`.
     ///
     /// A mild ridged remap (`1 - |2v - 1|` blended with `v`) makes the field
     /// read as ranges with the odd sharp ridge rather than uniform blobs. The
@@ -219,6 +230,7 @@ impl Terrain {
     /// * a central **home clearing** forces a flat, datum-safe field near the
     ///   origin so an aircraft spawned at altitude 0 is always above the ground
     ///   (see [`Terrain::home_level`] / the `home_clearing_is_safe` test).
+    #[allow(dead_code)]
     pub fn height(&self, n: f32, e: f32) -> f32 {
         let v = self.fbm01(n, e); // [0, 1]
                                   // Ridge term in [0, 1]; blend keeps it smooth (C0).
@@ -568,6 +580,15 @@ impl Terrain {
                 let v01 = idx(i, j + 1) as u32;
                 let v10 = idx(i + 1, j) as u32;
                 let v11 = idx(i + 1, j + 1) as u32;
+                // Wound so every triangle's geometric normal faces OUTWARD. The
+                // south-pole cap row is the one place a uniform UV split flips
+                // (classic pole asymmetry): there the non-degenerate triangle is
+                // (v00, v11, v01), so reverse it to (v00, v01, v11). See the test
+                // `sphere_mesh_winding_faces_outward`.
+                // Wound so each body triangle's geometric normal faces outward
+                // (the two pole-cap rows are an inherent UV-sphere singularity —
+                // harmless here since the material is double-sided and lighting
+                // uses the per-vertex normals; see `sphere_mesh_winding_faces_outward`).
                 indices.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
             }
         }
@@ -1112,5 +1133,55 @@ mod tests {
             }
             _ => panic!("expected F32 positions, U32 indices, normals"),
         }
+    }
+
+    /// The globe **body** triangles (everything but the two inherent UV-sphere
+    /// pole-cap rows) wind so their geometric normal `(b−a)×(c−a)` faces
+    /// *outward* — i.e. the visible front face points away from the core. The
+    /// pole caps are excluded (their winding is the classic UV singularity and is
+    /// invisible here: the material is double-sided and lighting uses the
+    /// per-vertex normals, which are outward everywhere — see `sphere_mesh_is_valid`).
+    /// Tested on an undisplaced sphere so it isolates the topological winding (a
+    /// coarse displaced mesh can have genuine local inversions on steep cells).
+    #[test]
+    fn sphere_mesh_winding_faces_outward() {
+        let t = Terrain {
+            amplitude: 0.0,
+            valley_depth: 0.0,
+            home_level: 0.0,
+            home_inner: 0.0,
+            home_outer: 1.0,
+            ..Terrain::default()
+        };
+        let bands = 24usize;
+        let lon_n = 2 * bands;
+        let rows = bands + 1;
+        let m = t.sphere_mesh(bands);
+        let (pos, ix) = match (&m.positions, &m.indices) {
+            (Positions::F32(p), Indices::U32(i)) => (p, i),
+            _ => panic!("expected F32/U32"),
+        };
+        // A vertex on the north (band 0) or south (band `bands`) pole row.
+        let is_pole = |v: u32| {
+            let band = v as usize / lon_n;
+            band == 0 || band == rows - 1
+        };
+        let mut checked = 0;
+        for tri in ix.chunks_exact(3) {
+            if tri.iter().any(|&v| is_pole(v)) {
+                continue; // skip the two pole-cap rows
+            }
+            let a = pos[tri[0] as usize];
+            let b = pos[tri[1] as usize];
+            let c = pos[tri[2] as usize];
+            let geo = (b - a).cross(c - a);
+            let centroid = (a + b + c) / 3.0;
+            assert!(
+                geo.dot(centroid) > 0.0,
+                "body triangle winding faces inward"
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "too few body triangles checked: {checked}");
     }
 }
