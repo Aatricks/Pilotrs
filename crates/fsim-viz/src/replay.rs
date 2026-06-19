@@ -67,15 +67,48 @@ impl ViewSnapshot {
         }
     }
 
-    /// Course over ground χ \[rad\] (NED), derived from the world velocity. Falls
-    /// back to the heading (yaw) when nearly stationary (quad hover) so the
-    /// minimap aircraft marker still points somewhere sensible.
+    /// Altitude above the planet surface \[m\]: `−z` for the quad (flat local
+    /// NED), `|p| − R` for the planet-centered fixed-wing.
+    pub fn altitude(&self) -> Real {
+        match self.kind {
+            AircraftKind::Quad => -self.position.z,
+            AircraftKind::FixedWing => fsim_sim::planet::altitude_of(self.position),
+        }
+    }
+
+    /// Attitude relative to the **local horizon** (`q_localNED_from_body`). The
+    /// quad's stored attitude already is local; the fixed-wing's PCI attitude is
+    /// composed with the local-NED frame at its current position.
+    pub fn local_attitude(&self) -> Quat {
+        match self.kind {
+            AircraftKind::Quad => self.attitude,
+            AircraftKind::FixedWing => {
+                fsim_sim::planet::ned_from_pci(self.position) * self.attitude
+            }
+        }
+    }
+
+    /// Local-frame velocity (NED) — the fixed-wing's PCI velocity rotated into
+    /// the local horizon; the quad's is already local.
+    fn local_velocity(&self) -> NaVec3 {
+        match self.kind {
+            AircraftKind::Quad => self.velocity,
+            AircraftKind::FixedWing => {
+                fsim_sim::planet::ned_from_pci(self.position) * self.velocity
+            }
+        }
+    }
+
+    /// Course over ground χ \[rad\] in the local NED frame, derived from the
+    /// local velocity. Falls back to the local heading when nearly stationary
+    /// (quad hover) so the minimap aircraft marker still points somewhere sane.
     pub fn course(&self) -> Real {
-        if self.velocity.x.hypot(self.velocity.y) < 0.1 {
-            let (_, _, yaw) = self.attitude.euler_angles();
+        let v = self.local_velocity();
+        if v.x.hypot(v.y) < 0.1 {
+            let (_, _, yaw) = self.local_attitude().euler_angles();
             yaw
         } else {
-            self.velocity.y.atan2(self.velocity.x)
+            v.y.atan2(v.x)
         }
     }
 }

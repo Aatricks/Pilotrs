@@ -255,7 +255,7 @@ impl OrbitCam {
                     handled: false,
                     ..
                 } => {
-                    self.dist = (self.dist * (1.0 - delta.1 * 0.0015)).clamp(40.0, 6000.0);
+                    self.dist = (self.dist * (1.0 - delta.1 * 0.0015)).clamp(40.0, 14000.0);
                 }
                 _ => {}
             }
@@ -369,19 +369,19 @@ fn main() {
         // planet (the zoom-out is bounded to 6 km so the camera core-distance stays
         // under ~13 km and the back of the globe — ~R beyond it — is never clipped).
         10.0,
-        20000.0,
+        30000.0,
     );
     let mut orbit = OrbitCam {
         az: std::f32::consts::PI, // behind the aircraft, looking North
         el: 0.5,                  // ~29° above the local horizon
-        dist: 1200.0,
+        dist: 1400.0,
     };
 
-    let ambient = AmbientLight::new(&context, 0.5, Srgba::WHITE);
+    let ambient = AmbientLight::new(&context, 0.4, Srgba::WHITE);
     // Sun: lights the home hemisphere (+x) from the upper side. On the globe a
     // surface's outward normal is its radial; this direction (L = −dir) has a
     // positive component along the home radial so the airfield is lit.
-    let directional = DirectionalLight::new(&context, 2.4, Srgba::WHITE, vec3(-0.7, -0.35, -0.55));
+    let directional = DirectionalLight::new(&context, 2.8, Srgba::WHITE, vec3(-0.7, -0.35, -0.55));
 
     // The planet: the procedural terrain baked onto a globe (built once; lit
     // per-vertex colours), centred at the PCI origin.
@@ -841,13 +841,23 @@ fn controls_window(
             ui.separator();
 
             // --- state readout (airframe-agnostic) ---
-            let (r, p, y) = view.attitude.euler_angles();
+            let (r, p, y) = view.local_attitude().euler_angles();
             ui.monospace(format!("t        {:7.2} s", view.t));
-            ui.monospace(format!("alt (-z) {:7.2} m", -view.position.z));
-            ui.monospace(format!(
-                "pos N/E  {:8.1} {:8.1} m",
-                view.position.x, view.position.y
-            ));
+            ui.monospace(format!("altitude {:7.1} m", view.altitude()));
+            match view.kind {
+                AircraftKind::Quad => ui.monospace(format!(
+                    "pos N/E  {:8.1} {:8.1} m",
+                    view.position.x, view.position.y
+                )),
+                AircraftKind::FixedWing => {
+                    let (lat, lon, _) = planet::pci_to_geodetic(view.position);
+                    ui.monospace(format!(
+                        "lat/lon  {:7.2} {:7.2} deg",
+                        lat.to_degrees(),
+                        lon.to_degrees()
+                    ))
+                }
+            };
             ui.monospace(format!(
                 "att RPY  {:6.1} {:6.1} {:6.1}",
                 r.to_degrees(),
@@ -1102,7 +1112,7 @@ fn fw_telemetry_window(ui: &mut egui::Ui, samples: &[FwSample]) {
                             PlotPoints::from(
                                 samples
                                     .iter()
-                                    .map(|s| [s.t, -s.truth.position.z])
+                                    .map(|s| [s.t, planet::altitude_of(s.truth.position)])
                                     .collect::<Vec<_>>(),
                             ),
                         )
@@ -1133,14 +1143,10 @@ fn fw_telemetry_window(ui: &mut egui::Ui, samples: &[FwSample]) {
                                 samples
                                     .iter()
                                     .map(|s| {
-                                        [
-                                            s.t,
-                                            s.truth
-                                                .velocity
-                                                .y
-                                                .atan2(s.truth.velocity.x)
-                                                .to_degrees(),
-                                        ]
+                                        // Local-frame course (PCI velocity → local NED).
+                                        let v = planet::ned_from_pci(s.truth.position)
+                                            * s.truth.velocity;
+                                        [s.t, v.y.atan2(v.x).to_degrees()]
                                     })
                                     .collect::<Vec<_>>(),
                             ),

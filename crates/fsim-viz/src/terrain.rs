@@ -105,22 +105,21 @@ impl Default for Terrain {
         Self {
             seed: 0x5EED_1234,
             half_extent: 2400.0,
-            // Real mountains: peaks to +320 m above the datum, valleys to −120 m
-            // — ~440 m of relief over the ~4.8 km map reads as steep ranges, not
-            // a gentle plain. The fixed-wing's cruise/route altitude is lifted
-            // above the peaks (see main.rs) so it flies over them, not through.
-            amplitude: 320.0,
-            valley_depth: 120.0,
-            base_wavelength: 1400.0,
+            // Earth-like globe: continents climb to +350 m, ocean floors sink to
+            // −400 m, meeting at sea_level. The fixed-wing cruises above the peaks
+            // (see main.rs). `sea_level` is the ocean threshold (≈ the datum);
+            // `home_level` keeps the airfield just above it (land) yet below the
+            // quad's altitude-0 spawn so the quad always clears the ground.
+            amplitude: 350.0,
+            valley_depth: 400.0,
+            base_wavelength: 1100.0,
             octaves: 7,
             lacunarity: 2.0,
             gain: 0.5,
-            sea_level: -80.0,
-            home_level: -12.0,
-            home_inner: 170.0,
-            // Blend the flat clearing out over a longer span so the airfield
-            // rises into the surrounding mountains rather than walling up.
-            home_outer: 800.0,
+            sea_level: -30.0,
+            home_level: -5.0,
+            home_inner: 150.0,
+            home_outer: 400.0,
         }
     }
 }
@@ -320,22 +319,29 @@ impl Terrain {
         }
         let span = (self.max_height() - self.sea_level).max(1.0);
         let t = ((h - self.sea_level) / span).clamp(0.0, 1.0);
-        let shore = rgb(182, 170, 120);
-        let lowland = rgb(70, 118, 52);
-        let grass = rgb(104, 140, 64);
-        let tan = rgb(152, 138, 92);
-        let rock_hi = rgb(122, 114, 106);
-        let snow = rgb(238, 242, 247);
-        let base = if t < 0.05 {
-            mix_rgb(shore, lowland, t / 0.05)
-        } else if t < 0.32 {
-            mix_rgb(lowland, grass, (t - 0.05) / 0.27)
-        } else if t < 0.58 {
-            mix_rgb(grass, tan, (t - 0.32) / 0.26)
-        } else if t < 0.82 {
-            mix_rgb(tan, rock_hi, (t - 0.58) / 0.24)
+        self.land_ramp(t, slope)
+    }
+
+    /// The land colour ramp shared by the flat and spherical samplers: sandy
+    /// coast → green lowland → grass → tan → grey rock → snow by elevation
+    /// fraction `t ∈ [0,1]`, with brown rock blended onto steep faces.
+    fn land_ramp(&self, t: f32, slope: f32) -> Srgba {
+        let shore = rgb(196, 188, 138); // sandy coast just above the water
+        let lowland = rgb(62, 116, 54); // lush low ground
+        let grass = rgb(96, 138, 64); // rolling green
+        let tan = rgb(150, 140, 96); // dry highland
+        let rock_hi = rgb(122, 114, 106); // bare grey rock
+        let snow = rgb(240, 244, 248); // near-white peak
+        let base = if t < 0.04 {
+            mix_rgb(shore, lowland, t / 0.04)
+        } else if t < 0.30 {
+            mix_rgb(lowland, grass, (t - 0.04) / 0.26)
+        } else if t < 0.55 {
+            mix_rgb(grass, tan, (t - 0.30) / 0.25)
+        } else if t < 0.80 {
+            mix_rgb(tan, rock_hi, (t - 0.55) / 0.25)
         } else {
-            mix_rgb(rock_hi, snow, (t - 0.82) / 0.18)
+            mix_rgb(rock_hi, snow, (t - 0.80) / 0.20)
         };
         let rock = rgb(96, 80, 64);
         let rock_mix = ((slope - 0.18) / 0.30).clamp(0.0, 1.0);
@@ -459,18 +465,40 @@ impl Terrain {
     // home clearing is keyed to the angular distance from [`home_dir`]. The same
     // colour ramp ([`ramp_color`](Self::ramp_color)) is reused.
 
-    /// Elevation \[m\] above the sea-level surface at a unit direction `dir` on
-    /// the planet — the spherical analogue of [`height`](Self::height).
+    /// Elevation \[m\] relative to sea level at a unit direction `dir` on the
+    /// planet — the spherical analogue of [`height`](Self::height). Earth-like:
+    /// roughly [`SEA_FRACTION`] of the surface lies below `sea_level` (ocean),
+    /// the rest rises into land; oceans are deep, land climbs to `amplitude`.
     pub fn height_dir(&self, dir: Vec3) -> f32 {
         let dir = dir.normalize();
         let v = self.fbm3_01(dir);
         let ridged = 1.0 - (2.0 * v - 1.0).abs();
-        let shaped = 0.7 * v + 0.3 * ridged;
-        let relief = -self.valley_depth + shaped * (self.amplitude + self.valley_depth);
-        // Flat home clearing keyed to arc distance from the home direction.
+        let shaped = 0.65 * v + 0.35 * ridged; // [0,1]
+
+        // Continental shelf: a piecewise map so SEA_FRACTION of the field is
+        // ocean (deep, down to −valley_depth) and the rest is land (up to
+        // amplitude), meeting at `sea_level`.
+        let h = if shaped < SEA_FRACTION {
+            lerp(-self.valley_depth, self.sea_level, shaped / SEA_FRACTION)
+        } else {
+            lerp(
+                self.sea_level,
+                self.amplitude,
+                (shaped - SEA_FRACTION) / (1.0 - SEA_FRACTION),
+            )
+        };
+
+        // Flat home airfield (kept above sea level so the quad sits on land, and
+        // below the quad's altitude-0 spawn anchor so it always clears).
         let arc = dir.dot(home_dir()).clamp(-1.0, 1.0).acos() * R_PLANET;
         let hf = home_blend(arc, self.home_inner, self.home_outer);
-        lerp(self.home_level, relief, hf)
+        lerp(self.home_level, h, hf)
+    }
+
+    /// Polar fraction at a direction: 0 below ~latitude 75°, ramping to 1 at the
+    /// poles — drives the ice caps in [`color_dir`](Self::color_dir).
+    fn polar_frac(dir: Vec3) -> f32 {
+        ((dir.normalize().z.abs() - 0.78) / 0.20).clamp(0.0, 1.0)
     }
 
     /// Outward surface normal (unit PCI vector) at `dir`, from central finite
@@ -495,12 +523,24 @@ impl Terrain {
         }
     }
 
-    /// Surface colour at a direction (spherical analogue of [`color`](Self::color)).
+    /// Earth-like surface colour at a direction: blue oceans (deep→shallow),
+    /// green/brown/rock/snow continents, and white polar ice caps.
     pub fn color_dir(&self, dir: Vec3) -> Srgba {
         let dir = dir.normalize();
-        // slope = 1 − (outward normal · radial); 0 flat, 1 vertical.
+        let h = self.height_dir(dir);
+        let polar = Self::polar_frac(dir);
+        if h <= self.sea_level {
+            // Ocean: deep→shallow by depth, freezing to sea-ice near the poles.
+            let depth = ((self.sea_level - h) / (self.sea_level - self.min_height()).max(1.0))
+                .clamp(0.0, 1.0);
+            let ocean = mix_rgb(rgb(44, 116, 170), rgb(12, 38, 92), depth);
+            return mix_rgb(ocean, rgb(226, 236, 242), polar * 0.85);
+        }
+        // Land: elevation fraction above sea level + slope, then snow at the poles.
+        let span = (self.max_height() - self.sea_level).max(1.0);
+        let t = ((h - self.sea_level) / span).clamp(0.0, 1.0);
         let slope = 1.0 - self.normal_dir(dir).dot(dir).clamp(0.0, 1.0);
-        self.ramp_color(self.height_dir(dir), slope)
+        mix_rgb(self.land_ramp(t, slope), rgb(240, 244, 248), polar)
     }
 
     /// The displaced PCI surface point for a direction: `(R + height) · dir`.
@@ -675,6 +715,9 @@ impl Terrain {
 
 /// Planet radius in metres (f32 mirror of `fsim_core::planet::PLANET_RADIUS`).
 const R_PLANET: f32 = 6371.0;
+
+/// Fraction of the planet below sea level (ocean) in the Earth-like height map.
+const SEA_FRACTION: f32 = 0.56;
 
 /// The home surface direction (PCI `+x`, lat/lon = 0): centre of the flat
 /// clearing and the anchor for both airframes.
