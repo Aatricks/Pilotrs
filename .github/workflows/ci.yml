@@ -61,9 +61,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: install GUI deps
+      - name: install GUI + gamepad deps
+        # libudev-dev: gilrs reads gamepads through libudev/evdev on Linux.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libwayland-dev libx11-dev
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libwayland-dev libx11-dev libudev-dev
       - name: build viz
         run: cargo build -p fsim-viz

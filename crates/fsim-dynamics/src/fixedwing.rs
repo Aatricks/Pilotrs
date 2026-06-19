@@ -415,7 +415,6 @@ pub fn short_period_modes(
     trim: &Trim,
     mut elevator_of: impl FnMut(Real, Real) -> Real,
 ) -> ShortPeriodModes {
-    let _ = (p, trim, &mut elevator_of);
     let va = trim.state.velocity.norm();
     let attitude = trim.state.attitude;
     let vb_trim = attitude.inverse() * trim.state.velocity;
@@ -425,10 +424,10 @@ pub fn short_period_modes(
     let mut f = |alpha: Real, q: Real| -> (Real, Real) {
         let vb = Vec3::new(va * Float::cos(alpha), 0.0, va * Float::sin(alpha));
         let state = State13 {
-            position : Vec3::zeros(),
-            velocity : attitude * vb,
+            position: Vec3::zeros(),
+            velocity: attitude * vb,
             attitude,
-            angular_rate : Vec3::new(0.0, q, 0.0),
+            angular_rate: Vec3::new(0.0, q, 0.0),
         };
         let controls = FixedWingControls {
             aileron: 0.0,
@@ -438,11 +437,13 @@ pub fn short_period_modes(
         };
         let wrench = fixedwing_wrench(&state, p, &controls, Vec3::zeros(), Vec3::zeros());
         let f_body = attitude.inverse() * wrench.force_world;
-        let q_dot = rigid_body_deriv(&state, &wrench, p.mass, &p.inertia, &p.inertia_inv).d_angular_rate.y;
+        let q_dot = rigid_body_deriv(&state, &wrench, p.mass, &p.inertia, &p.inertia_inv)
+            .d_angular_rate
+            .y;
         let alpha_dot = q + (vb.x * f_body.z - vb.z * f_body.x) / (p.mass * va * va);
         (alpha_dot, q_dot)
     };
-    
+
     let h = 1e-6;
     let (base_a, base_q) = f(alpha_trim, 0.0);
     let (da_a, da_q) = f(alpha_trim + h, 0.0);

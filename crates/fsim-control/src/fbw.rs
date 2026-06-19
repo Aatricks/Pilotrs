@@ -182,7 +182,6 @@ impl FlyByWire {
 
     /// SAS + CAS: stabilize the airframe while tracking the pilot's rate commands.
     fn augmented(&self, est: &EstState, stick: &StickInput) -> FixedWingControls {
-        let _ = (&self.cfg, est, stick);
         let v_body = est.attitude.inverse() * est.velocity;
         let alpha = Float::atan2(v_body.z, v_body.x);
         let va = est.velocity.norm();
@@ -191,16 +190,16 @@ impl FlyByWire {
         let va_s = Float::max(va, self.cfg.va_min);
         let q_bar = 0.5 * self.cfg.rho * va_s * va_s;
         let q_bar_ref = 0.5 * self.cfg.rho * self.cfg.va_ref * self.cfg.va_ref;
-        let sched = (q_bar_ref/ q_bar).clamp(self.cfg.sched.0, self.cfg.sched.1);
+        let sched = (q_bar_ref / q_bar).clamp(self.cfg.sched.0, self.cfg.sched.1);
 
         let q_cmd = self.cfg.q_max * stick.pitch;
         let p_cmd = self.cfg.p_max * stick.roll;
 
         let elevator = self.cfg.elevator_trim
-            + sched * (self.cfg.k_alpha * (alpha - self.cfg.alpha_trim)
-            + self.cfg.k_q * (q - q_cmd));
-        let aileron = sched * self.cfg.k_roll*(p_cmd-p);
-        let rudder = -stick.yaw*self.cfg.rudder_max + sched*self.cfg.k_yaw_damp*r;
+            + sched
+                * (self.cfg.k_alpha * (alpha - self.cfg.alpha_trim) + self.cfg.k_q * (q - q_cmd));
+        let aileron = sched * self.cfg.k_roll * (p_cmd - p);
+        let rudder = -stick.yaw * self.cfg.rudder_max + sched * self.cfg.k_yaw_damp * r;
         let throttle = stick.throttle;
         FixedWingControls {
             elevator,
