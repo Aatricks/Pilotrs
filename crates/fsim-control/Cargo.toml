@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Autopilot: cascaded PID (rate -> attitude). LQR/MPC and outer loops later. no_std-clean."
+description = "Autopilot: cascaded PID and LQR inner loops, position/velocity control, and a fixed-wing autopilot. no_std-clean."
 
 [features]
 default = ["std"]

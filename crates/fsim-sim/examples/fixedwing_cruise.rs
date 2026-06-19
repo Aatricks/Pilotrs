@@ -1,4 +1,4 @@
-//! Fixed-wing demo (M6): a trimmed Aerosonde flies a sequence of autopilot
+//! Fixed-wing demo: a trimmed Aerosonde flies a sequence of autopilot
 //! setpoints — hold cruise, climb, change heading, change airspeed — proving the
 //! same `State13` + RK4 + rigid-body EOM that flies the quad also flies a totally
 //! different airframe with its own aero model and autopilot.
@@ -11,7 +11,7 @@ fn main() {
     let params = FixedWingParams::aerosonde();
     let tr = trim(&params, 25.0, 0.0).expect("Aerosonde 25 m/s level trim converges");
     let (_, theta, _) = tr.state.attitude.euler_angles();
-    println!("Aerosonde fixed-wing (M6) — reuses the quad's RK4 + rigid-body EOM\n");
+    println!("Aerosonde fixed-wing — reuses the quad's RK4 + rigid-body EOM\n");
     println!(
         "trim @ 25 m/s level: alpha/theta {:.2}°  elevator {:.3} rad  throttle {:.2}\n",
         theta.to_degrees(),

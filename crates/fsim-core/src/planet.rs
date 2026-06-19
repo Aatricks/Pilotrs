@@ -1,4 +1,4 @@
-//! # Spherical planet model (M7)
+//! # Spherical planet model
 //!
 //! A 1/1000-scale Earth: a sphere of radius [`PLANET_RADIUS`] ≈ 6371 m
 //! (~40 km circumference — a "tiny planet"). This module holds the pure,

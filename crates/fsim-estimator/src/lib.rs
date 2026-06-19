@@ -1,9 +1,10 @@
 //! # fsim-estimator
 //!
 //! Fuses noisy sensors back into a best estimate of the state — the module the
-//! autopilot actually acts on. M1 ships a [`ComplementaryFilter`] (a
-//! Mahony-style explicit complementary filter on attitude); M2 replaces it with
-//! a quaternion Multiplicative EKF behind the same [`Estimator`] trait.
+//! autopilot actually acts on. The [`ComplementaryFilter`] (a
+//! Mahony-style explicit complementary filter on attitude) is the lightweight
+//! option; the quaternion Multiplicative EKF is a drop-in replacement behind the
+//! same [`Estimator`] trait.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -26,7 +27,7 @@ use fsim_core::{BaroMeas, EstState, GpsMeas, ImuMeas, MagMeas, Real, Vec3};
 /// the MEKF overrides the ones it uses.
 ///
 /// The `Send` supertrait lets a `Box<dyn Estimator>` (and therefore the whole
-/// `Sim`) move onto a worker thread for the M4 threaded engine. `Send` is a
+/// `Sim`) move onto a worker thread for the threaded engine. `Send` is a
 /// `core` marker, so this keeps the crate no_std-clean; all impls are plain
 /// `f64`/`nalgebra`/`ChaCha8` structs that are already `Send`.
 pub trait Estimator: Send {
@@ -36,10 +37,10 @@ pub trait Estimator: Send {
     /// Correct heading/attitude with a magnetometer sample.
     fn update_mag(&mut self, _mag: &MagMeas) {}
 
-    /// Correct position/velocity with a GPS fix (used by the M3 INS).
+    /// Correct position/velocity with a GPS fix (used by the INS).
     fn update_gps(&mut self, _gps: &GpsMeas) {}
 
-    /// Correct altitude with a barometer sample (used by the M3 INS).
+    /// Correct altitude with a barometer sample (used by the INS).
     fn update_baro(&mut self, _baro: &BaroMeas) {}
 
     /// The current best estimate (what the controller consumes).

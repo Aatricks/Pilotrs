@@ -2,7 +2,7 @@
 #
 # The `core -> ... -> control` crates form a no_std-clean "flight-control" ring:
 # they must build with `--no-default-features`. All OS/GPU/windowing baggage is
-# quarantined in the `fsim-viz` leaf crate. See the plan and crate docs.
+# quarantined in the `fsim-viz` leaf crate. See the crate docs for details.
 [workspace]
 resolver = "2"
 members = ["crates/*"]

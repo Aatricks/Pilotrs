@@ -1,4 +1,4 @@
-//! Fixed-wing autopilot (M6): a classic decoupled successive-loop-closure
+//! Fixed-wing autopilot: a classic decoupled successive-loop-closure
 //! controller producing the four [`FixedWingControls`]. It reuses the same
 //! scalar [`Pid`](crate::Pid) as the quad cascade; inner-loop rate damping is
 //! applied to the measured rate directly (no derivative kick on setpoint steps).

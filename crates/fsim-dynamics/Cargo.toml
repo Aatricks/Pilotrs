@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "6DOF rigid-body plant (Newton-Euler EOM) and RK4 integrator. no_std-clean."
+description = "6DOF rigid-body plant (Newton-Euler EOM) and RK4 integrator, with quadrotor and fixed-wing aerodynamics + trim. no_std-clean."
 
 [features]
 default = ["std"]

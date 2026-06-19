@@ -5,7 +5,7 @@
 //!
 //! Two sampling domains share one noise/colour recipe:
 //!
-//! * **Spherical (M7, the live path):** [`Terrain::height_dir`] /
+//! * **Spherical (the live path):** [`Terrain::height_dir`] /
 //!   [`Terrain::color_dir`] / [`Terrain::sphere_mesh`] sample elevation as a
 //!   function of a 3D *direction* on the planet (3D-domain fBm, no lat/lon seam)
 //!   and displace a globe of radius `R = 6371 m` radially. This is what the
@@ -458,7 +458,7 @@ impl Terrain {
         -self.height(n, e)
     }
 
-    // === Spherical planet (M7) ==========================================
+    // === Spherical planet ===============================================
     //
     // The globe samples elevation as a function of a 3D **direction** (a point on
     // the unit sphere) using 3D-domain fBm, so there is no lat/lon seam. The flat
@@ -1105,7 +1105,7 @@ mod tests {
         }
     }
 
-    // === Spherical sampling (M7) ========================================
+    // === Spherical sampling =============================================
 
     /// On the globe, the home clearing is flat (== `home_level` < 0) within the
     /// inner radius, so the quad spawned at the home surface (altitude 0) clears

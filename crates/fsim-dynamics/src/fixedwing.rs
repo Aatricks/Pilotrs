@@ -1,5 +1,5 @@
 //! Fixed-wing aircraft: aerodynamic force/moment model, parameters, and a trim
-//! solver (M6). The 6DOF rigid-body EOM and the RK4 integrator are **shared**
+//! solver. The 6DOF rigid-body EOM and the RK4 integrator are **shared**
 //! with the multirotor — only the [`Wrench`] computation and the mass/inertia
 //! differ. The aero model is the Beard & McLain linear-coefficient model
 //! expressed in our NED/FRD conventions.

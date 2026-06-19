@@ -2,7 +2,7 @@
 //! filter). Unlike the [`Mekf`](crate::Mekf) AHRS, the INS uses the
 //! accelerometer as the **strapdown propagation input** (not a gravity
 //! reference), so a sustained translating maneuver no longer corrupts attitude
-//! — that's the whole point of M3. GPS (position + velocity), baro (altitude),
+//! — that's the whole point of the INS. GPS (position + velocity), baro (altitude),
 //! and the magnetometer (heading) aid the propagation; attitude becomes
 //! observable through the velocity↔attitude coupling whenever thrust is on.
 //!
@@ -10,7 +10,7 @@
 //! `q_{world←body}`, accel bias b_a (body), gyro bias b_g (body).
 //! Error state `δx = [δp, δv, δθ, δb_a, δb_g] ∈ ℝ¹⁵` with the **same
 //! body-frame right-multiplicative** attitude convention as the MEKF, so all
-//! the M2 attitude signs carry over unchanged.
+//! the MEKF attitude signs carry over unchanged.
 //!
 //! ## Load-bearing derivation
 //!
@@ -212,7 +212,7 @@ impl Default for Ins {
 
 impl Estimator for Ins {
     fn predict(&mut self, imu: &ImuMeas, dt: Real) {
-        // Raw gyro to the controller (M2 policy); debias internally.
+        // Raw gyro to the controller (same policy as the MEKF); debias internally.
         self.rate = imu.gyro;
         let omega = imu.gyro - self.b_g; // ω̂
         let f = imu.accel - self.b_a; // f̂
@@ -481,7 +481,7 @@ mod tests {
         // accelerometer reads the tilted specific force. Both filters START with
         // the same 6° attitude error. The INS treats accel as an input and
         // *recovers* to level (GPS/mag aiding); the AHRS treats accel as gravity
-        // and *diverges*. This is the M3 thesis (recovery, not trivial hold).
+        // and *diverges*. This is the core INS claim (recovery, not trivial hold).
         use crate::Mekf;
         let q_true = UnitQuaternion::identity();
         let a_world = Vec3::new(3.0, 0.0, 0.0);

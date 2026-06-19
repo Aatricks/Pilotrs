@@ -27,7 +27,7 @@ pub struct ImuConfig {
 }
 
 impl ImuConfig {
-    /// Light-noise config for the M1 MVP (consumer-MEMS-ish, mild).
+    /// Light-noise config (consumer-MEMS-ish, mild).
     pub fn mvp(rate_hz: Real) -> Self {
         Self {
             rate_hz,
@@ -39,7 +39,7 @@ impl ImuConfig {
         }
     }
 
-    /// Realistic noisy MEMS with bias random-walk (M2).
+    /// Realistic noisy MEMS with bias random-walk.
     pub fn realistic(rate_hz: Real) -> Self {
         Self {
             rate_hz,

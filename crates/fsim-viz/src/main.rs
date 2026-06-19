@@ -5,7 +5,7 @@
 //! here and nothing in the flight-control core depends on it.
 //!
 //! The renderer is a pure *consumer*: the deterministic physics runs on its own
-//! thread inside a `SimEngine`/`FwEngine` (M4), and each display frame the
+//! thread inside a `SimEngine`/`FwEngine`, and each display frame the
 //! viewer reads the latest published [`ViewSnapshot`](replay::ViewSnapshot) and
 //! sends UI changes as commands — physics and rendering are fully decoupled. The
 //! same viewer flies either airframe (quad or fixed-wing) and can play back a
@@ -79,8 +79,8 @@ struct Ui {
     replay_seek: Option<f64>,
 }
 
-/// Estimator selection: 0 = complementary filter (M1), 1 = MEKF (M2),
-/// 2 = INS (M3). Switching rebuilds the sim.
+/// Estimator selection: 0 = complementary filter, 1 = MEKF,
+/// 2 = INS. Switching rebuilds the sim.
 fn make_cfg(est_kind: u8) -> SimConfig {
     match est_kind {
         0 => SimConfig::quad_250_mvp(),
@@ -127,13 +127,13 @@ fn quad_guidance() -> GuidanceConfig {
 /// estimator / controller switches.
 fn make_source(ui: &Ui) -> Source {
     if ui.fixed_wing {
-        // Fixed-wing flies on truth feedback over the spherical planet (M7);
+        // Fixed-wing flies on truth feedback over the spherical planet;
         // routes are drawn on the minimap. Spawn above the mountain peaks
         // (≈320 m) so level cruise and routes fly over the terrain, not through
         // it (the sim has no terrain collision).
         Source::live_fixedwing(FwSimConfig::aerosonde_at(ui.fw_altitude as f64))
     } else {
-        // Quad missions need the INS estimator (M3) — `build_cfg(2, _)` — or the
+        // Quad missions need the INS estimator — `build_cfg(2, _)` — or the
         // worker silently counts SetMission as rejected.
         let s = Source::live_quad(build_cfg(ui.est_kind, ui.controller_lqr));
         if ui.mission_on && ui.est_kind == 2 {
@@ -442,7 +442,7 @@ fn main() {
     let mut ui = Ui {
         fixed_wing: false,
         do_airframe_switch: false,
-        est_kind: 2,           // default to the M3 INS stack
+        est_kind: 2,           // default to the INS stack
         controller_lqr: false, // default to the cascaded PID
         mission_on: true,      // INS only: fly the square mission
         roll: 0.0,
@@ -690,7 +690,7 @@ fn main() {
                     .iter()
                     .map(|w| Waypoint::ne_alt(w.lat as f64 * r, w.lon as f64 * r, alt))
                     .collect();
-                // Quad missions need the INS (M3); switch + rebuild if necessary.
+                // Quad missions need the INS; switch + rebuild if necessary.
                 if ui.est_kind != 2 {
                     ui.est_kind = 2;
                     source = make_source(&ui);
@@ -868,7 +868,7 @@ fn controls_window(
 fn quad_controls(ui: &mut egui::Ui, _view: &ViewSnapshot, hover: f64, st: &mut Ui) {
     ui.label("estimator");
     ui.horizontal(|ui| {
-        for (k, name) in [(0u8, "CF (M1)"), (1, "MEKF (M2)"), (2, "INS (M3)")] {
+        for (k, name) in [(0u8, "CF"), (1, "MEKF"), (2, "INS")] {
             if ui.radio(st.est_kind == k, name).clicked() && st.est_kind != k {
                 st.est_kind = k;
                 st.do_reset = true;
@@ -885,7 +885,7 @@ fn quad_controls(ui: &mut egui::Ui, _view: &ViewSnapshot, hover: f64, st: &mut U
     } else if st.mission_on {
         ui.label("(mission needs the INS)");
     }
-    // Inner attitude controller: PID (M1) vs LQR (M5).
+    // Inner attitude controller: PID vs LQR.
     ui.horizontal(|ui| {
         ui.label("controller");
         if ui.radio(!st.controller_lqr, "PID").clicked() && st.controller_lqr {
@@ -970,7 +970,7 @@ fn telemetry_window(ui: &mut egui::Ui, samples: &[TelemetrySample]) {
                         );
                     });
             }
-            // Position estimate vs truth (M3 INS only; CF/MEKF leave it at zero).
+            // Position estimate vs truth (INS only; CF/MEKF leave it at zero).
             if samples.iter().any(|s| s.estimate.position.norm() > 1e-6) {
                 ui.label("position truth vs est (m)");
                 let pos = |sel: &dyn Fn(&TelemetrySample) -> f64| -> Vec<[f64; 2]> {
@@ -1021,7 +1021,7 @@ fn telemetry_window(ui: &mut egui::Ui, samples: &[TelemetrySample]) {
                     }
                 });
 
-            // Gyro-bias estimate vs the hidden truth (the MEKF's M2 win).
+            // Gyro-bias estimate vs the hidden truth (the MEKF's key win).
             if samples.iter().any(|s| s.est_gyro_bias.norm() > 1e-12) {
                 ui.label("gyro bias est vs true (rad/s)");
                 let axis_pts = |sel: &dyn Fn(&TelemetrySample) -> f64| -> Vec<[f64; 2]> {

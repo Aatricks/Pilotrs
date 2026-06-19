@@ -4,7 +4,7 @@
 //! drives attitude at high frequency (integrate body rate), while the
 //! **accelerometer** anchors roll/pitch at low frequency by measuring the
 //! gravity direction. Yaw is unobservable from gravity alone, so it rides on
-//! the gyro until the magnetometer arrives (M2).
+//! the gyro until the magnetometer arrives.
 //!
 //! Each step:
 //! 1. Estimate the "up" direction in the body frame from the current attitude,
@@ -32,7 +32,7 @@ pub struct ComplementaryConfig {
 
 impl Default for ComplementaryConfig {
     fn default() -> Self {
-        // M1's gyro is clean (no bias), so gyro integration is already an
+        // This model's gyro is clean (no bias), so gyro integration is already an
         // excellent attitude reference and we keep `kp` low — the accel term is
         // there for slow leveling / initial alignment, not heavy correction. A
         // high `kp` actively *hurts* during accelerated flight: a quad holding a
@@ -40,7 +40,7 @@ impl Default for ComplementaryConfig {
         // points along body −z ("apparent level") regardless of true tilt, so a
         // strong accel correction drags the estimate toward level. Removing that
         // acceleration from the specific force needs velocity aiding — exactly
-        // what the M2 MEKF/INS adds.
+        // what the MEKF/INS adds.
         Self {
             kp: 0.3,
             accel_gate: 0.15,
@@ -115,7 +115,7 @@ impl Estimator for ComplementaryFilter {
         self.q.renormalize();
 
         // Best body-rate estimate is the raw gyro (bias estimation comes with
-        // the MEKF in M2).
+        // the MEKF).
         self.rate = imu.gyro;
     }
 

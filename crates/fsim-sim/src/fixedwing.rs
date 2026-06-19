@@ -1,12 +1,11 @@
-//! A thin fixed-wing simulation loop (M6). It reuses only the airframe-agnostic
+//! A thin fixed-wing simulation loop. It reuses only the airframe-agnostic
 //! parts of the stack — `State13`, the `Rk4` integrator, the shared
 //! `rigid_body_deriv`, and the fixed-wing aero `Wrench` — wired to the fixed-wing
 //! autopilot. The quad scheduler is welded to `CtrlCmd` + a mixer + motors, so a
 //! fixed-wing (four surfaces, body-x thrust) gets its own ~40-line loop.
 //!
-//! For M6 the autopilot flies on **truth** (perfect feedback), exactly as the
-//! quad's M1 did before the M2/M3 estimators were added; swapping in sensors +
-//! the INS is the one-line `est` change deferred to a future milestone.
+//! The autopilot here flies on **truth** (perfect feedback); swapping in sensors
+//! and the INS is a one-line `est` change left for future work.
 
 use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
 use crate::guidance::Waypoint;
@@ -36,7 +35,7 @@ pub struct FwSimConfig {
 
 impl FwSimConfig {
     /// Aerosonde trimmed for 25 m/s level cruise at 100 m over the **home**
-    /// point, heading North — spawned on the sphere (M7).
+    /// point, heading North — spawned on the sphere.
     pub fn aerosonde_cruise() -> Self {
         Self::aerosonde_at(100.0)
     }
@@ -107,10 +106,10 @@ enum FwMode {
 
 /// A deterministic fixed-wing simulator: autopilot → aero wrench → RK4.
 ///
-/// Flies in still air for M6: the plant's `fixedwing_wrench` supports a wind
-/// field, but the truth-feedback autopilot has no way to separate airspeed from
-/// ground speed without an airspeed sensor, so wind (and Dryden turbulence) are
-/// deferred to the same future milestone that adds sensors to this loop.
+/// Flies in still air: the plant's `fixedwing_wrench` supports a wind field, but
+/// the truth-feedback autopilot has no way to separate airspeed from ground speed
+/// without an airspeed sensor, so wind (and Dryden turbulence) are deferred to
+/// the same future work that adds sensors to this loop.
 pub struct FwSim {
     truth: State13,
     params: FixedWingParams,
@@ -230,11 +229,11 @@ impl FwSim {
     /// Advance one base step (control runs on its own slower gate).
     pub fn step(&mut self) {
         if self.tick.is_multiple_of(self.control_period) {
-            // Route mode: derive the setpoint from truth (M6 perfect feedback).
+            // Route mode: derive the setpoint from truth (perfect feedback).
             if let FwMode::Route(g) = &mut self.mode {
                 self.setpoint = g.update(self.truth.position);
             }
-            // Truth feedback (M6), rotated into the local horizon (M7 sphere).
+            // Truth feedback, rotated into the local horizon (sphere).
             let est = local_est_from_pci(&self.truth);
             let control_dt = self.control_period as Real * self.dt;
             self.controls = self

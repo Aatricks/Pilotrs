@@ -1,7 +1,8 @@
 //! First-order motor model: thrust lags its command with time constant `tau`.
 //!
-//! M1 uses [`MotorModel::ideal`] (`tau = 0`, instantaneous). M3 sets a real
-//! `tau` (a few tens of ms) and can later add a nonlinear thrust curve.
+//! By default the motors are ideal via [`MotorModel::ideal`] (`tau = 0`,
+//! instantaneous); a nonzero `tau` (a few tens of ms) models real motors and
+//! can later add a nonlinear thrust curve.
 
 use fsim_core::Real;
 use num_traits::Float;
@@ -27,7 +28,7 @@ impl MotorModel {
         }
     }
 
-    /// Ideal motors (no lag) — used by the M1 MVP.
+    /// Ideal motors (no lag).
     pub fn ideal(max_thrust: Real) -> Self {
         Self::new(0.0, max_thrust)
     }

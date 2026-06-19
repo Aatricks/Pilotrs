@@ -30,7 +30,7 @@ impl Waypoint {
 
     /// Build a **planet-centered (PCI)** waypoint from geographic latitude /
     /// longitude \[rad\] and altitude \[m\] above the surface — for the spherical
-    /// fixed-wing route guidance (M7). `position` is the PCI point; `yaw` unused.
+    /// fixed-wing route guidance. `position` is the PCI point; `yaw` unused.
     pub fn geodetic(lat: Real, lon: Real, altitude: Real) -> Self {
         Self {
             position: fsim_core::planet::geodetic_to_pci(lat, lon, altitude),

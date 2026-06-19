@@ -11,7 +11,7 @@ use fsim_dynamics::{aerodynamic_wrench, Integrator, MultirotorParams, Plant, Rig
 use fsim_estimator::{ComplementaryFilter, Estimator, Ins, Mekf};
 use fsim_sensors::{Baro, Gps, Imu, Mag, Sensor, Truth};
 
-/// Waypoint guidance + position/velocity controller (M3 position mode).
+/// Waypoint guidance + position/velocity controller (position mode).
 struct PositionMode {
     guidance: Guidance,
     ctrl: PositionController,
@@ -19,9 +19,9 @@ struct PositionMode {
 
 /// How the autopilot is commanded.
 enum ControlMode {
-    /// Attitude/thrust setpoint set externally (M1/M2 modes).
+    /// Attitude/thrust setpoint set externally (attitude-tracking modes).
     Attitude,
-    /// Waypoint guidance → position/velocity control (M3; needs the INS, which
+    /// Waypoint guidance → position/velocity control (needs the INS, which
     /// is the only estimator returning real position/velocity). Boxed because
     /// it is much larger than the `Attitude` variant.
     Position(Box<PositionMode>),
@@ -398,7 +398,7 @@ mod tests {
         // small, so the complementary filter's gravity assumption holds and the
         // craft tracks the command closely through the full estimator-in-the-loop
         // path. (Large sustained tilts would diverge — see the module note; that's
-        // the M2 MEKF's job.)
+        // the MEKF's job.)
         let cfg = SimConfig::quad_250_mvp();
         let hover = cfg.hover_thrust();
         let mut sim = Sim::new(cfg);
@@ -468,7 +468,7 @@ mod tests {
         // estimators and compare attitude error vs a level/static truth. The CF
         // has no heading reference, so it integrates the gyro's yaw bias and
         // drifts; the MEKF estimates the bias (using the magnetometer) and stays
-        // put. This is the headline M2 result.
+        // put. This is the headline MEKF result.
         use fsim_estimator::{ComplementaryFilter, Estimator, Mekf};
         use fsim_sensors::{Imu, Mag, Sensor, Truth};
 
@@ -610,7 +610,11 @@ mod tests {
             }
             v
         };
-        assert_eq!(fingerprint(), fingerprint(), "M3 mission not deterministic");
+        assert_eq!(
+            fingerprint(),
+            fingerprint(),
+            "INS mission not deterministic"
+        );
     }
 
     #[test]

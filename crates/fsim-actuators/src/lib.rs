@@ -6,7 +6,8 @@
 //!    desired `(collective thrust, body torque)` into four individual motor
 //!    thrusts via the airframe mixing matrix.
 //! 2. [`MotorModel`] applies a first-order lag so motors don't respond
-//!    instantly (M1 uses [`MotorModel::ideal`]; real lag arrives in M3).
+//!    instantly (by default the motors are ideal via [`MotorModel::ideal`];
+//!    a nonzero lag models real motors).
 //! 3. [`Mixer::collect`] recombines the *actual* motor thrusts back into the
 //!    achieved wrench — so motor saturation and lag actually affect the plant.
 

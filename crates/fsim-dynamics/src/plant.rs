@@ -57,7 +57,7 @@ pub trait Plant {
 }
 
 /// The Newton-Euler rigid-body derivative for **any** airframe, given its net
-/// wrench and mass properties. Both the multirotor and the M6 fixed-wing plant
+/// wrench and mass properties. Both the multirotor and the fixed-wing plant
 /// reuse this — only their mass/inertia and how they build the [`Wrench`]
 /// differ. The inertia may be a full (non-diagonal) tensor, so a fixed-wing's
 /// `Jxz` cross term is handled by the gyroscopic `ω×Iω` and `I⁻¹` terms.

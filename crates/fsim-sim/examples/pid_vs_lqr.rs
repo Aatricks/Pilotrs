@@ -1,5 +1,5 @@
-//! A/B comparison of the two inner attitude controllers: cascaded PID (M1) vs
-//! LQR (M5). Both fly the SAME plant, sensors, and seed — only the controller
+//! A/B comparison of the two inner attitude controllers: cascaded PID vs
+//! LQR. Both fly the SAME plant, sensors, and seed — only the controller
 //! changes — so the step-response and mission-tracking differences are
 //! attributable to the controller alone.
 //!

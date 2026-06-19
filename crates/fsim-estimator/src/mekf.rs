@@ -255,7 +255,7 @@ impl Estimator for Mekf {
         // accurate field this is consistent and gives full attitude aiding; a
         // real system with inclination/declination error would instead use a
         // tilt-compensated *heading-only* update to keep model error out of
-        // roll/pitch — deferred until that error source exists (M3+).
+        // roll/pitch — deferred until that error source exists.
         let n = mag.field.norm();
         if n > 1e-9 {
             self.update_reference(
@@ -267,7 +267,7 @@ impl Estimator for Mekf {
         }
     }
 
-    // GPS/baro position fusion is the M3 INS; the 6-state AHRS ignores them.
+    // GPS/baro position fusion is the INS; the 6-state AHRS ignores them.
     fn update_gps(&mut self, _gps: &GpsMeas) {}
     fn update_baro(&mut self, _baro: &BaroMeas) {}
 

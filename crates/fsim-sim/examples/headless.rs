@@ -1,7 +1,7 @@
-//! Headless demo (no graphics) of the M3 stack: the 15-state INS flies a square
+//! Headless demo (no graphics) of the INS stack: the 15-state INS flies a square
 //! waypoint mission with position/velocity control, realistic GPS/baro/mag
 //! noise, and motor lag. Prints waypoint progress + INS-vs-truth tracking, then
-//! the M2 contrast (MEKF estimates gyro bias; CF drifts).
+//! the MEKF contrast (MEKF estimates gyro bias; CF drifts).
 //!
 //! Run with `cargo run -p fsim-sim --example headless`.
 
@@ -12,7 +12,7 @@ fn deg(r: f64) -> f64 {
 }
 
 fn main() {
-    // ---- M3: INS + position control flying a square mission ----
+    // ---- INS + position control flying a square mission ----
     let mut sim = Sim::new(SimConfig::quad_250_m3());
     sim.set_mission(
         vec![
@@ -25,7 +25,7 @@ fn main() {
         GuidanceConfig::default(),
     );
 
-    println!("M3: 15-state INS flying a 5 m square mission (position control)\n");
+    println!("15-state INS flying a 5 m square mission (position control)\n");
     println!("  t[s]  wp   truth N,E,Up [m]        INS est N,E,Up [m]      |est-truth|");
     println!("  ------------------------------------------------------------------------");
     let mut max_track = 0.0_f64;
@@ -61,7 +61,7 @@ fn main() {
         max_track,
     );
 
-    // ---- M2 contrast: MEKF estimates the gyro bias; the CF drifts ----
+    // ---- MEKF contrast: MEKF estimates the gyro bias; the CF drifts ----
     use fsim_estimator::{ComplementaryFilter, Estimator, Mekf};
     use fsim_sensors::{Imu, Mag, Sensor, Truth};
     let c = SimConfig::quad_250_m2();
@@ -85,7 +85,7 @@ fn main() {
             mekf.update_mag(&mm);
         }
     }
-    println!("\nM2 estimator contrast (same biased-IMU stream, static truth, 30 s):");
+    println!("\nMEKF estimator contrast (same biased-IMU stream, static truth, 30 s):");
     println!(
         "  complementary filter attitude error: {:6.2} deg  (yaw drifts on the gyro bias)",
         deg(truth.attitude.angle_to(&cf.state().attitude))
@@ -95,7 +95,7 @@ fn main() {
         deg(truth.attitude.angle_to(&mekf.state().attitude))
     );
 
-    // Determinism with the full M3 stack.
+    // Determinism with the full INS stack.
     let rerun = {
         let mut s2 = Sim::new(SimConfig::quad_250_m3());
         s2.set_mission(
@@ -112,7 +112,7 @@ fn main() {
     );
     s3.run_headless(5000);
     println!(
-        "\n  deterministic M3 re-run identical: {}",
+        "\n  deterministic re-run identical: {}",
         rerun.to_vector() == s3.truth().to_vector()
     );
 }

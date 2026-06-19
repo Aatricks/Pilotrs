@@ -1,4 +1,4 @@
-//! Fixed-wing route-following guidance on the **sphere** (M7): walks a list of
+//! Fixed-wing route-following guidance on the **sphere**: walks a list of
 //! planet-centered (PCI) [`Waypoint`]s, emitting a [`FixedWingSetpoint`]
 //! (airspeed / altitude / course) each control gate and advancing to the next
 //! waypoint once inside a *great-circle* acceptance radius. Like the quad
@@ -65,7 +65,7 @@ impl Default for FwGuidanceConfig {
     /// Sized for the Aerosonde (25 m/s, φ_max = 30° → R ≈ 110 m). The 120 m
     /// accept radius is just above one turn radius so corners are capturable.
     /// `k_path` is the gentle 0.01 /m tuned with the course loop so the ground
-    /// track converges smoothly instead of snaking (see the M6 tuning note).
+    /// track converges smoothly instead of snaking (see the fixed-wing tuning note).
     fn default() -> Self {
         Self {
             airspeed: 25.0,

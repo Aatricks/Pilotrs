@@ -4,3 +4,6 @@
 
 # criticalup writes installation state here when a Ferrocene toolchain is installed
 .criticalup/
+
+# local development scratchpad / notes
+.remember/

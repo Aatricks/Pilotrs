@@ -89,8 +89,8 @@ impl EstState {
     }
 }
 
-/// Setpoint fed to the autopilot. For the M1 attitude controller this is a
-/// desired attitude plus a collective thrust; outer loops (M3) will populate it
+/// Setpoint fed to the autopilot. For the attitude controller this is a
+/// desired attitude plus a collective thrust; outer loops will populate it
 /// from position/velocity/waypoint guidance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Setpoint {
@@ -130,7 +130,7 @@ impl CtrlCmd {
     }
 }
 
-/// A fixed-wing actuator command (M6): control-surface angles \[rad\] and
+/// A fixed-wing actuator command: control-surface angles \[rad\] and
 /// throttle \[0,1\]. The fixed-wing analogue of [`CtrlCmd`].
 ///
 /// Sign conventions (FRD, trailing-edge-down-positive surfaces): `+elevator`

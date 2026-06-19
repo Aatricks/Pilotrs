@@ -5,8 +5,8 @@
 //! bundle and emits a noisy sample using its **own seeded** `ChaCha8Rng`, so
 //! every run is bit-for-bit reproducible (never `thread_rng`).
 //!
-//! M1 ships the [`Imu`]; GPS, baro, and magnetometer slot in for M2 behind the
-//! same [`Sensor`] trait without changing the scheduler.
+//! The [`Imu`] is the first sensor; GPS, baro, and magnetometer slot in behind
+//! the same [`Sensor`] trait without changing the scheduler.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]

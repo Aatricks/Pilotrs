@@ -9,11 +9,11 @@ use fsim_sensors::{BaroConfig, GpsConfig, ImuConfig, MagConfig};
 /// Which estimator the scheduler runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstimatorKind {
-    /// Mahony complementary filter (M1).
+    /// Mahony complementary filter.
     Complementary,
-    /// Quaternion MEKF / AHRS (M2).
+    /// Quaternion MEKF / AHRS.
     Mekf,
-    /// 15-state INS (M3) — fuses GPS/baro/velocity; the only estimator that
+    /// 15-state INS — fuses GPS/baro/velocity; the only estimator that
     /// returns real position/velocity (required for position control).
     Ins,
 }
@@ -21,9 +21,9 @@ pub enum EstimatorKind {
 /// Which inner attitude/rate controller the scheduler runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerKind {
-    /// Cascaded attitude→rate PID (M1).
+    /// Cascaded attitude→rate PID.
     Pid,
-    /// LQR optimal state feedback (M5).
+    /// LQR optimal state feedback.
     Lqr,
 }
 
@@ -41,9 +41,9 @@ pub struct SimConfig {
     pub params: MultirotorParams,
     /// IMU noise model.
     pub imu: ImuConfig,
-    /// GPS model (sampled + wired now; position fusion is M3).
+    /// GPS model (sampled + wired now; position fusion is done by the INS).
     pub gps: GpsConfig,
-    /// Barometer model (sampled + wired now; altitude fusion is M3).
+    /// Barometer model (sampled + wired now; altitude fusion is done by the INS).
     pub baro: BaroConfig,
     /// Magnetometer model (used by the MEKF for yaw).
     pub mag: MagConfig,
@@ -62,7 +62,7 @@ pub struct SimConfig {
     pub control: CascadedConfig,
     /// LQR controller weights (used when `controller_kind == Lqr`).
     pub lqr: LqrConfig,
-    /// Outer position/velocity controller gains/limits (M3 position mode).
+    /// Outer position/velocity controller gains/limits (position mode).
     pub position: PositionConfig,
 
     /// Mixer arm length \[m\].
@@ -71,7 +71,7 @@ pub struct SimConfig {
     pub yaw_coeff: Real,
     /// Per-motor thrust limit \[N\].
     pub max_thrust: Real,
-    /// Motor first-order lag \[s\] (0 = ideal, the M1 default).
+    /// Motor first-order lag \[s\] (0 = ideal, the default).
     pub motor_tau: Real,
 
     /// Master RNG seed (each sensor derives an independent stream from it).
@@ -79,7 +79,7 @@ pub struct SimConfig {
 }
 
 impl SimConfig {
-    /// The M1 MVP: 250-class quad, 1 kHz physics/IMU, 500 Hz control, light IMU
+    /// A 250-class quad: 1 kHz physics/IMU, 500 Hz control, light IMU
     /// noise, complementary filter, ideal motors.
     pub fn quad_250_mvp() -> Self {
         Self {
@@ -107,7 +107,7 @@ impl SimConfig {
         }
     }
 
-    /// M2: realistic noisy sensors (with gyro bias) + the quaternion MEKF, which
+    /// Realistic noisy sensors (with gyro bias) + the quaternion MEKF, which
     /// estimates that bias. The same config with [`EstimatorKind::Complementary`]
     /// shows the filter the MEKF improves on (the CF drifts on the biased gyro).
     pub fn quad_250_m2() -> Self {
@@ -121,7 +121,7 @@ impl SimConfig {
         }
     }
 
-    /// M3: realistic sensors + the 15-state INS + realistic motor lag. The INS
+    /// Realistic sensors + the 15-state INS + realistic motor lag. The INS
     /// returns real position/velocity, enabling position control + waypoint
     /// guidance (see [`crate::Sim::set_mission`]).
     pub fn quad_250_m3() -> Self {
