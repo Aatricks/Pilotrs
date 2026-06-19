@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 mod messages;
+pub mod planet;
 mod state;
 
 pub use messages::{

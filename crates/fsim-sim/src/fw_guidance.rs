@@ -1,26 +1,34 @@
-//! Fixed-wing route-following guidance (M6): walks a list of NED [`Waypoint`]s,
-//! emitting a [`FixedWingSetpoint`] (airspeed / altitude / course) each control
-//! gate and advancing to the next waypoint once inside a *horizontal*
-//! acceptance radius. Like the quad [`Guidance`](crate::Guidance), the waypoint
-//! *list* lives here (std/heap) so the `fsim-control` math stays no_std-clean.
+//! Fixed-wing route-following guidance on the **sphere** (M7): walks a list of
+//! planet-centered (PCI) [`Waypoint`]s, emitting a [`FixedWingSetpoint`]
+//! (airspeed / altitude / course) each control gate and advancing to the next
+//! waypoint once inside a *great-circle* acceptance radius. Like the quad
+//! [`Guidance`](crate::Guidance), the waypoint *list* lives here (std/heap) so
+//! the `fsim-control` math stays no_std-clean.
 //!
-//! ## Guidance law (all signs derived in our NED frame: x North, y East, z Down)
+//! ## Guidance law (great-circle vector field)
 //!
-//! Course comes from straight-line vector-field guidance
-//! ([`line_course`](crate::line_course)) along the active *leg* from the
-//! previous waypoint (the leg origin) to the active waypoint, with
-//! `path_course = atan2(dE, dN) = atan2(dy, dx)` — the same `atan2(y, x)`
-//! convention as the course `χ` itself. Altitude is the active waypoint's
-//! altitude (`-z`); airspeed is constant from config. See [`cross_track`] /
-//! [`line_course`] for the sign of the cross-track term (positive = right of the
-//! path direction → command a course to the left, back onto the path).
+//! Each leg from the previous waypoint (the leg origin) to the active waypoint
+//! defines a **great circle** with unit normal `n = â × b̂`
+//! ([`gc_normal`](fsim_core::planet::gc_normal)). The course to fly is the
+//! great-circle *tangent at the aircraft's current position*
+//! ([`gc_course`](fsim_core::planet::gc_course)) corrected by the signed
+//! cross-track distance ([`gc_cross_track`](fsim_core::planet::gc_cross_track)):
 //!
-//! The fixed-wing reuses the quad's [`Waypoint`] type; only the horizontal
-//! `(x, y)` and the altitude `-z` are used (the `yaw` field is ignored).
+//! ```text
+//! χ_cmd = gc_course(pos, n) − χ∞ · (2/π) · atan(k_path · cross_track)
+//! ```
+//!
+//! This is the spherical twin of the flat-earth `line_course` field — same
+//! sign convention (positive cross-track = right of the path → steer left),
+//! same `χ∞` / `k_path` tuning — but the path is a geodesic, so a long leg
+//! follows the curve of the planet instead of cutting the chord. Capture uses
+//! the **great-circle (arc) distance** to the active waypoint; the commanded
+//! altitude is the active waypoint's altitude above the surface.
 
-use crate::fixedwing::line_course;
 use crate::guidance::Waypoint;
+use core::f64::consts::PI;
 use fsim_control::FixedWingSetpoint;
+use fsim_core::planet::{altitude_of, gc_course, gc_cross_track, gc_distance, gc_normal};
 use fsim_core::{Real, Vec3};
 
 /// What to do once the *last* waypoint is captured.
@@ -40,14 +48,14 @@ pub enum TerminalAction {
 pub struct FwGuidanceConfig {
     /// Constant commanded airspeed \[m/s\].
     pub airspeed: Real,
-    /// **Horizontal** acceptance radius \[m\]: advance to the next waypoint once
-    /// the horizontal distance to the active one drops below this. Must
+    /// **Great-circle** acceptance radius \[m\]: advance to the next waypoint once
+    /// the surface (arc) distance to the active one drops below this. Must
     /// comfortably exceed the turn radius `R = Va²/(g·tan φ_max)` (≈110 m for a
     /// 25 m/s Aerosonde at 30°) or tight corners become un-capturable.
     pub accept_radius: Real,
-    /// Approach angle far from the path `χ∞ ∈ (0, π/2]` for [`line_course`].
+    /// Approach angle far from the path `χ∞ ∈ (0, π/2]` for the vector field.
     pub chi_inf: Real,
-    /// Cross-track convergence gain `k_path > 0` for [`line_course`].
+    /// Cross-track convergence gain `k_path > 0`.
     pub k_path: Real,
     /// What to do after the final waypoint.
     pub terminal: TerminalAction,
@@ -56,16 +64,8 @@ pub struct FwGuidanceConfig {
 impl Default for FwGuidanceConfig {
     /// Sized for the Aerosonde (25 m/s, φ_max = 30° → R ≈ 110 m). The 120 m
     /// accept radius is just above one turn radius so corners are capturable.
-    ///
-    /// `k_path` is deliberately *gentle* (0.01 /m, not the 0.05 the raw
-    /// `line_course` unit test uses). The cross-track loop is the course loop
-    /// wrapped by the vector field: if the field demands cross-track correction
-    /// faster than the course loop's bandwidth it under-damps and the ground
-    /// track snakes (visible left/right S-turns along a straight leg). At
-    /// 25 m/s, `k_path = 0.01` keeps the cross-track demand rate
-    /// (`χ∞·(2/π)·k_path·Va ≈ 0.14 /s`) comfortably below the course-loop
-    /// bandwidth (~0.34 rad/s with the tuned gains), so the path converges
-    /// smoothly. `chi_inf = 0.9` still gives a crisp intercept far from the line.
+    /// `k_path` is the gentle 0.01 /m tuned with the course loop so the ground
+    /// track converges smoothly instead of snaking (see the M6 tuning note).
     fn default() -> Self {
         Self {
             airspeed: 25.0,
@@ -77,25 +77,25 @@ impl Default for FwGuidanceConfig {
     }
 }
 
-/// A fixed-wing route follower. Stateful only in the active-leg index (and the
-/// latched terminal setpoint), so two runs from the same inputs produce
-/// identical setpoints — no RNG, deterministic.
+/// A fixed-wing route follower on the sphere. Stateful only in the active-leg
+/// index (and the latched terminal setpoint), so two runs from the same inputs
+/// produce identical setpoints — no RNG, deterministic.
 #[derive(Debug, Clone)]
 pub struct FwGuidance {
     waypoints: Vec<Waypoint>,
     /// Index of the active *target* waypoint (the end of the current leg).
     idx: usize,
-    /// Origin of the very first leg: the position where the route began. For
+    /// Origin of the very first leg: the PCI position where the route began. For
     /// leg `i>0` the origin is `waypoints[i-1]`; for `i==0` it is this start.
     start: Vec3,
     cfg: FwGuidanceConfig,
     /// Latched terminal setpoint, frozen the first gate after the final capture
-    /// so `HoldCourse` flies a fixed straight line (no further re-aiming jitter).
+    /// so `HoldCourse` flies a fixed course (no further re-aiming jitter).
     terminal_sp: Option<FixedWingSetpoint>,
 }
 
 impl FwGuidance {
-    /// Build a follower. `start` is the aircraft's current NED position, used as
+    /// Build a follower. `start` is the aircraft's current PCI position, used as
     /// the origin of the first leg (so leg 0 is start → `waypoints[0]`). An empty
     /// list degrades to holding the start altitude on a North course.
     pub fn new(waypoints: Vec<Waypoint>, start: Vec3, cfg: FwGuidanceConfig) -> Self {
@@ -136,29 +136,48 @@ impl FwGuidance {
         }
     }
 
-    /// Advance if inside the *horizontal* acceptance radius (one-way latch), then
+    /// Great-circle course to fly along the leg `origin → target`, evaluated at
+    /// the aircraft's current position `pos`, corrected by cross-track. Falls
+    /// back to a direct bearing for a degenerate (zero-length / antipodal) leg.
+    fn leg_course(&self, pos: Vec3, origin: Vec3, target: Vec3) -> Real {
+        let n = gc_normal(origin, target);
+        if n == Vec3::zeros() {
+            // Degenerate leg: aim straight at the target along its own great circle.
+            let n2 = gc_normal(pos, target);
+            if n2 == Vec3::zeros() {
+                0.0
+            } else {
+                gc_course(pos, n2)
+            }
+        } else {
+            let path = gc_course(pos, n);
+            let xt = gc_cross_track(pos, n);
+            path - self.cfg.chi_inf * (2.0 / PI) * (self.cfg.k_path * xt).atan()
+        }
+    }
+
+    /// Advance if inside the great-circle acceptance radius (one-way latch), then
     /// emit the setpoint for the (possibly newly-selected) active waypoint.
     ///
-    /// `pos` is the truth/estimated NED position. Only `(x, y)` is used for
-    /// capture; the active waypoint's altitude is commanded regardless of `z`.
+    /// `pos` is the truth/estimated PCI position. Capture uses the surface (arc)
+    /// distance only; the active waypoint's altitude is commanded regardless of
+    /// the current radius.
     pub fn update(&mut self, pos: Vec3) -> FixedWingSetpoint {
         // Empty route: hold start altitude, fly North.
         if self.waypoints.is_empty() {
             return FixedWingSetpoint {
                 airspeed: self.cfg.airspeed,
-                altitude: -self.start.z,
+                altitude: altitude_of(self.start),
                 course: 0.0,
             };
         }
 
-        // Horizontal capture: advance the latch if within accept_radius (x,y only).
+        // Great-circle capture: advance the latch if within accept_radius (arc).
         let active = self.waypoints[self.idx].position;
-        let horiz = (pos.x - active.x).hypot(pos.y - active.y);
-        if horiz < self.cfg.accept_radius {
+        if gc_distance(pos, active) < self.cfg.accept_radius {
             if self.idx + 1 < self.waypoints.len() {
                 self.idx += 1;
             } else if self.terminal_sp.is_none() {
-                // Final waypoint captured: latch the terminal action.
                 self.terminal_sp = Some(self.terminal_setpoint(pos));
             }
         }
@@ -168,51 +187,25 @@ impl FwGuidance {
             return sp;
         }
 
-        // Active leg: origin → waypoints[idx]. Vector-field course law.
         let origin = self.leg_origin();
-        let wp = self.waypoints[self.idx].position;
-        let (dn, de) = (wp.x - origin.x, wp.y - origin.y); // North, East deltas
-
-        // Degenerate (zero-length) leg: aim straight at the waypoint instead.
-        let course = if dn.hypot(de) < 1e-3 {
-            let (gn, ge) = (wp.x - pos.x, wp.y - pos.y);
-            if gn.hypot(ge) < 1e-6 {
-                0.0 // on top of it: hold North (will capture next gate anyway)
-            } else {
-                ge.atan2(gn) // atan2(East, North) = χ
-            }
-        } else {
-            let path_course = de.atan2(dn); // atan2(dy, dx) — leg's NED course
-            line_course(pos, origin, path_course, self.cfg.chi_inf, self.cfg.k_path)
-        };
-
+        let target = self.waypoints[self.idx].position;
         FixedWingSetpoint {
             airspeed: self.cfg.airspeed,
-            altitude: -wp.z, // active waypoint altitude
-            course: wrap_pi(course),
+            altitude: altitude_of(target),
+            course: wrap_pi(self.leg_course(pos, origin, target)),
         }
     }
 
-    /// Setpoint to latch when the final waypoint is captured.
+    /// Setpoint to latch when the final waypoint is captured: hold the final-leg
+    /// great-circle course (frozen at the capture point) and the last altitude.
     fn terminal_setpoint(&self, pos: Vec3) -> FixedWingSetpoint {
         let last = self.waypoints[self.idx].position;
         match self.cfg.terminal {
-            TerminalAction::HoldCourse => {
-                // Hold the final-leg course (origin → last) and fly straight off
-                // the end. Fall back to current bearing for a 1-point route.
-                let origin = self.leg_origin();
-                let (dn, de) = (last.x - origin.x, last.y - origin.y);
-                let course = if dn.hypot(de) < 1e-3 {
-                    (last.y - pos.y).atan2(last.x - pos.x)
-                } else {
-                    de.atan2(dn)
-                };
-                FixedWingSetpoint {
-                    airspeed: self.cfg.airspeed,
-                    altitude: -last.z,
-                    course: wrap_pi(course),
-                }
-            }
+            TerminalAction::HoldCourse => FixedWingSetpoint {
+                airspeed: self.cfg.airspeed,
+                altitude: altitude_of(last),
+                course: wrap_pi(self.leg_course(pos, self.leg_origin(), last)),
+            },
         }
     }
 }
@@ -231,37 +224,39 @@ mod tests {
         FwGuidanceConfig::default()
     }
 
-    // A craft North of a due-East leg (left of the East heading, e_py < 0) is
+    // A craft North of a due-East equatorial leg (left of the East heading) is
     // commanded to steer right (course > π/2), back onto the path. Pure law.
     #[test]
-    fn course_sign_in_ned() {
-        let wps = vec![Waypoint::ne_alt(0.0, 400.0, 120.0)]; // due-East leg from origin
-        let mut g = FwGuidance::new(wps, Vec3::zeros(), cfg());
-        let sp = g.update(Vec3::new(30.0, 50.0, -120.0)); // 30 m North of the East leg
+    fn course_sign_on_sphere() {
+        let start = Waypoint::geodetic(0.0, 0.0, 400.0).position;
+        let wps = vec![Waypoint::geodetic(0.0, 0.06, 400.0)]; // due-East leg
+        let mut g = FwGuidance::new(wps, start, cfg());
+        // ~30 km... no — small angles: lat 0.005 rad ≈ 32 m North, lon 0.03 mid-leg.
+        let craft = Waypoint::geodetic(0.005, 0.03, 400.0).position;
+        let sp = g.update(craft);
         assert!(
             sp.course > FRAC_PI_2,
             "north of an east leg should steer right (course>π/2): {}",
             sp.course
         );
-        assert!((sp.altitude - 120.0).abs() < 1e-12);
+        assert!((sp.altitude - 400.0).abs() < 1e-6);
         assert!((sp.airspeed - 25.0).abs() < 1e-12);
     }
 
     // Reaching the active waypoint advances the index; the final capture latches.
     #[test]
     fn advances_and_latches_terminal() {
-        let wps = vec![
-            Waypoint::ne_alt(400.0, 0.0, 120.0),
-            Waypoint::ne_alt(400.0, 400.0, 120.0),
-        ];
-        let mut g = FwGuidance::new(wps, Vec3::new(0.0, 0.0, -120.0), cfg());
+        let start = Waypoint::geodetic(0.0, 0.0, 400.0).position;
+        let wp0 = Waypoint::geodetic(0.02, 0.0, 400.0);
+        let wp1 = Waypoint::geodetic(0.02, 0.02, 400.0);
+        let mut g = FwGuidance::new(vec![wp0, wp1], start, cfg());
         assert_eq!(g.current_index(), Some(0));
         // Sit at wp0 → advance to wp1.
-        g.update(Vec3::new(400.0, 0.0, -120.0));
+        g.update(wp0.position);
         assert_eq!(g.current_index(), Some(1));
         assert!(!g.is_complete());
         // Sit at wp1 (final) → latch HoldCourse.
-        g.update(Vec3::new(400.0, 400.0, -120.0));
+        g.update(wp1.position);
         assert!(g.is_complete());
         assert!(g.on_final());
     }
@@ -269,15 +264,16 @@ mod tests {
     // HoldCourse keeps a fixed setpoint after capture (no jitter).
     #[test]
     fn terminal_holds_a_fixed_setpoint() {
-        let wps = vec![Waypoint::ne_alt(0.0, 400.0, 100.0)]; // East leg
-        let mut g = FwGuidance::new(wps, Vec3::zeros(), cfg());
-        g.update(Vec3::new(0.0, 400.0, -100.0)); // capture final
-        let a = g.update(Vec3::new(10.0, 500.0, -100.0));
-        let b = g.update(Vec3::new(-20.0, 900.0, -100.0));
+        let start = Waypoint::geodetic(0.0, 0.0, 300.0).position;
+        let wps = vec![Waypoint::geodetic(0.0, 0.05, 300.0)]; // East leg
+        let mut g = FwGuidance::new(wps, start, cfg());
+        g.update(Waypoint::geodetic(0.0, 0.05, 300.0).position); // capture final
+        let a = g.update(Waypoint::geodetic(0.001, 0.06, 300.0).position);
+        let b = g.update(Waypoint::geodetic(-0.002, 0.09, 300.0).position);
         assert_eq!(a, b, "terminal setpoint should be latched/constant");
         assert!(
-            (a.course - FRAC_PI_2).abs() < 1e-9,
-            "should hold East: {}",
+            (a.course - FRAC_PI_2).abs() < 0.05,
+            "should hold ~East: {}",
             a.course
         );
     }
@@ -285,10 +281,11 @@ mod tests {
     // An empty route degrades gracefully: hold start altitude, fly North.
     #[test]
     fn empty_route_holds_start() {
-        let mut g = FwGuidance::new(Vec::new(), Vec3::new(0.0, 0.0, -150.0), cfg());
+        let start = Waypoint::geodetic(0.1, -0.2, 150.0).position;
+        let mut g = FwGuidance::new(Vec::new(), start, cfg());
         assert_eq!(g.current_index(), None);
-        let sp = g.update(Vec3::new(10.0, 10.0, -140.0));
-        assert!((sp.altitude - 150.0).abs() < 1e-12);
+        let sp = g.update(Waypoint::geodetic(0.1, -0.2, 160.0).position);
+        assert!((sp.altitude - 150.0).abs() < 1e-6);
         assert!(sp.course.abs() < 1e-12);
     }
 }

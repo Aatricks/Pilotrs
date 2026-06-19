@@ -122,13 +122,11 @@ fn quad_guidance() -> GuidanceConfig {
 /// estimator / controller switches.
 fn make_source(ui: &Ui) -> Source {
     if ui.fixed_wing {
-        // Fixed-wing flies on truth feedback; routes are drawn on the minimap.
-        // Spawn it above the mountain peaks (≈320 m) so level cruise and routes
-        // fly over the terrain, not through it (the sim has no terrain collision).
-        let mut cfg = FwSimConfig::aerosonde_cruise();
-        cfg.initial.position.z = -(ui.fw_altitude as f64);
-        cfg.setpoint.altitude = ui.fw_altitude as f64;
-        Source::live_fixedwing(cfg)
+        // Fixed-wing flies on truth feedback over the spherical planet (M7);
+        // routes are drawn on the minimap. Spawn above the mountain peaks
+        // (≈320 m) so level cruise and routes fly over the terrain, not through
+        // it (the sim has no terrain collision).
+        Source::live_fixedwing(FwSimConfig::aerosonde_at(ui.fw_altitude as f64))
     } else {
         // Quad missions need the INS estimator (M3) — `build_cfg(2, _)` — or the
         // worker silently counts SetMission as rejected.

@@ -165,11 +165,18 @@ impl FixedWingParams {
 }
 
 /// Net wrench on a fixed-wing from aerodynamics, propeller thrust, and gravity.
+///
+/// `gravity_world` is the gravity acceleration in the *same* world frame the
+/// state lives in — the caller supplies it so the same plant serves both the
+/// flat-earth trim (constant `(0,0,+g)`) and the spherical sim (radial
+/// `fsim_core::planet::gravity_at(position)`); the aero forces are body-relative
+/// and frame-agnostic, so only this term differs between the two worlds.
 pub fn fixedwing_wrench(
     state: &State13,
     p: &FixedWingParams,
     c: &FixedWingControls,
     wind_world: Vec3,
+    gravity_world: Vec3,
 ) -> Wrench {
     // --- air data (body frame) ---
     let v_body = state.attitude.inverse() * (state.velocity - wind_world);
@@ -238,7 +245,7 @@ pub fn fixedwing_wrench(
     fx += thrust;
 
     let f_body = Vec3::new(fx, fy, fz);
-    let force_world = state.attitude * f_body + gravity_world() * p.mass;
+    let force_world = state.attitude * f_body + gravity_world * p.mass;
 
     // --- moments (body frame) ---
     let l = qbar * p.s * p.b * cl_roll;
@@ -288,7 +295,7 @@ pub fn trim(p: &FixedWingParams, va: Real, gamma: Real) -> Option<Trim> {
             rudder: 0.0,
             throttle: x[2],
         };
-        let wrench = fixedwing_wrench(&state, p, &controls, Vec3::zeros());
+        let wrench = fixedwing_wrench(&state, p, &controls, Vec3::zeros(), gravity_world());
         let d = rigid_body_deriv(&state, &wrench, p.mass, &p.inertia, &p.inertia_inv);
         let a_body = state.attitude.inverse() * d.d_velocity;
         Vec3::new(a_body.x, a_body.z, d.d_angular_rate.y)
@@ -347,7 +354,7 @@ mod tests {
     fn deriv(s: &State13, p: &FixedWingParams, c: &FixedWingControls) -> fsim_core::StateDeriv {
         rigid_body_deriv(
             s,
-            &fixedwing_wrench(s, p, c, Vec3::zeros()),
+            &fixedwing_wrench(s, p, c, Vec3::zeros(), gravity_world()),
             p.mass,
             &p.inertia,
             &p.inertia_inv,
@@ -388,7 +395,13 @@ mod tests {
         );
         // Va=0 guard.
         let z = State13::at_rest();
-        let wr = fixedwing_wrench(&z, &p, &FixedWingControls::zero(), Vec3::zeros());
+        let wr = fixedwing_wrench(
+            &z,
+            &p,
+            &FixedWingControls::zero(),
+            Vec3::zeros(),
+            gravity_world(),
+        );
         assert!(wr.force_world.iter().all(|f| f.is_finite()));
     }
 
@@ -403,7 +416,7 @@ mod tests {
             throttle: 0.0,
             ..FixedWingControls::zero()
         };
-        let wr = fixedwing_wrench(&s, &p, &c, Vec3::zeros());
+        let wr = fixedwing_wrench(&s, &p, &c, Vec3::zeros(), gravity_world());
         let f_body = s.attitude.inverse() * (wr.force_world - gravity_world() * p.mass);
         assert!(
             f_body.z < 0.0,
@@ -425,7 +438,13 @@ mod tests {
             let mut s = State13::at_rest();
             s.velocity = Vec3::new(25.0 * Float::cos(alpha), 0.0, 25.0 * Float::sin(alpha));
             s.attitude = UnitQuaternion::identity();
-            let wr = fixedwing_wrench(&s, &p, &FixedWingControls::zero(), Vec3::zeros());
+            let wr = fixedwing_wrench(
+                &s,
+                &p,
+                &FixedWingControls::zero(),
+                Vec3::zeros(),
+                gravity_world(),
+            );
             // Recover CL from the body-frame normal force.
             let f_body = s.attitude.inverse() * (wr.force_world - gravity_world() * p.mass);
             let qbar = 0.5 * p.rho * 25.0 * 25.0;
