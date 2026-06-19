@@ -181,41 +181,33 @@ impl FlyByWire {
     }
 
     /// SAS + CAS: stabilize the airframe while tracking the pilot's rate commands.
-    ///
-    /// ┌─ BLANK-AND-FILL · theory 2 of 2 · the fly-by-wire control law ──────────┐
-    /// Reference answer: `reference/fbw.rs.reference`  (gitignored).
-    /// Predict in DEVLOG.md BEFORE you read the reference, then implement.
-    ///
-    /// All the physics you need is in this module's header (signs, the law, the
-    /// gain-schedule subtlety). Returns the four [`FixedWingControls`]; the outer
-    /// [`step`](Self::step) clamps to the surface/throttle limits.
-    ///
-    /// BUILD:
-    ///  1. Air data from `est`: body velocity `v_body = attitude⁻¹ · velocity`;
-    ///     `alpha = atan2(w, u)`; `va = |velocity|`; body rates `p, q, r` straight
-    ///     off `est.angular_rate` (x, y, z).
-    ///  2. Gain schedule (BOOST-ONLY — read the module note on why the lower clamp
-    ///     is 1.0, not <1): `q̄ = ½·ρ·va²` (floor `va` at `va_min`),
-    ///     `q̄_ref = ½·ρ·va_ref²`, `sched = clamp(q̄_ref/q̄, sched.0, sched.1)`.
-    ///  3. Command augmentation: `q_cmd = q_max·stick.pitch` (+pitch = nose up
-    ///     = +q); `p_cmd = p_max·stick.roll` (+roll = roll right = +p).
-    ///  4. Surfaces (mind the authority signs — elevator authority is NEGATIVE,
-    ///     aileron POSITIVE):
-    ///       • `elevator = elevator_trim + sched·(k_alpha·(alpha − alpha_trim)
-    ///                      + k_q·(q − q_cmd))`   — SAS stabilizes AoA + tracks rate
-    ///       • `aileron  = sched·k_roll·(p_cmd − p)`            — roll-rate tracking
-    ///       • `rudder   = −stick.yaw·rudder_max + sched·k_yaw_damp·r`  — pedal +
-    ///                                                            yaw damper
-    ///       • `throttle = stick.throttle`
-    ///
-    /// WHY: jobs (1) stabilize the relaxed airframe (synthesize a negative
-    /// effective `Cm_alpha` via AoA feedback) and (2) let the pilot command a
-    /// *response* (a rate), not a raw deflection. Get a sign wrong and the
-    /// closed-loop eigenvalue test in `fsim-control` (`real_fbw_law_*`) goes red.
-    /// └─────────────────────────────────────────────────────────────────────────┘
     fn augmented(&self, est: &EstState, stick: &StickInput) -> FixedWingControls {
         let _ = (&self.cfg, est, stick);
-        todo!("implement the fly-by-wire SAS+CAS law — see reference/fbw.rs.reference")
+        let v_body = est.attitude.inverse() * est.velocity;
+        let alpha = Float::atan2(v_body.z, v_body.x);
+        let va = est.velocity.norm();
+        let (p, q, r) = (est.angular_rate.x, est.angular_rate.y, est.angular_rate.z);
+
+        let va_s = Float::max(va, self.cfg.va_min);
+        let q_bar = 0.5 * self.cfg.rho * va_s * va_s;
+        let q_bar_ref = 0.5 * self.cfg.rho * self.cfg.va_ref * self.cfg.va_ref;
+        let sched = (q_bar_ref/ q_bar).clamp(self.cfg.sched.0, self.cfg.sched.1);
+
+        let q_cmd = self.cfg.q_max * stick.pitch;
+        let p_cmd = self.cfg.p_max * stick.roll;
+
+        let elevator = self.cfg.elevator_trim
+            + sched * (self.cfg.k_alpha * (alpha - self.cfg.alpha_trim)
+            + self.cfg.k_q * (q - q_cmd));
+        let aileron = sched * self.cfg.k_roll*(p_cmd-p);
+        let rudder = -stick.yaw*self.cfg.rudder_max + sched*self.cfg.k_yaw_damp*r;
+        let throttle = stick.throttle;
+        FixedWingControls {
+            elevator,
+            aileron,
+            rudder,
+            throttle,
+        }
     }
 
     /// FCS OFF: stick straight to surfaces, no stabilization. On the relaxed
