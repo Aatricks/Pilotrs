@@ -10,6 +10,7 @@
 //! ([`Sim::run_headless`]) and the interactive viewer (which calls
 //! [`Sim::step`] from its render loop).
 
+mod atmosphere;
 mod batch;
 mod config;
 mod engine;
@@ -21,6 +22,7 @@ mod recording;
 mod scheduler;
 mod telemetry;
 
+pub use atmosphere::{Atmosphere, AtmosphereConfig};
 pub use batch::{
     aggregate, run_batch, run_batch_seq, run_one, seed_sweep, square_mission, summarize_default,
     McSummary, RunMetrics, RunSpec, RunTask,

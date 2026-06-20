@@ -16,6 +16,11 @@ fsim-sensors.workspace = true
 fsim-estimator.workspace = true
 fsim-control.workspace = true
 nalgebra.workspace = true
+# Deterministic, seeded turbulence (ChaCha8) — same discipline as the sensors.
+rand.workspace = true
+rand_chacha.workspace = true
+rand_distr.workspace = true
+num-traits.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

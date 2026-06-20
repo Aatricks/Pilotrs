@@ -46,6 +46,10 @@ pub struct ViewSnapshot {
     pub alpha: Real,
     /// Aerodynamic load factor \[g\] (fixed-wing; 0 for quad).
     pub load_factor: Real,
+    /// Steady wind speed \[m/s\] (fixed-wing; 0 for quad).
+    pub wind_speed: Real,
+    /// Instantaneous turbulence gust magnitude \[m/s\] (fixed-wing; 0 for quad).
+    pub gust: Real,
 }
 
 impl ViewSnapshot {
@@ -63,6 +67,8 @@ impl ViewSnapshot {
             fbw_on: false,
             alpha: 0.0,
             load_factor: 0.0,
+            wind_speed: 0.0,
+            gust: 0.0,
         }
     }
 
@@ -80,6 +86,8 @@ impl ViewSnapshot {
             fbw_on: s.fbw_on,
             alpha: s.alpha,
             load_factor: s.load_factor,
+            wind_speed: s.wind_speed,
+            gust: s.gust,
         }
     }
 

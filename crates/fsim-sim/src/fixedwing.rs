@@ -7,6 +7,7 @@
 //! The autopilot here flies on **truth** (perfect feedback); swapping in sensors
 //! and the INS is a one-line `est` change left for future work.
 
+use crate::atmosphere::{Atmosphere, AtmosphereConfig};
 use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
 use crate::guidance::Waypoint;
 use fsim_control::{
@@ -38,6 +39,8 @@ pub struct FwSimConfig {
     pub control_rate: Real,
     pub initial: State13,
     pub setpoint: FixedWingSetpoint,
+    /// The air the aircraft flies through (wind + turbulence). Defaults to calm.
+    pub atmosphere: AtmosphereConfig,
     /// Start the sim already under manual (pilot-stick) control rather than the
     /// autopilot. The relaxed-stability fighter uses this.
     pub start_manual: bool,
@@ -117,6 +120,7 @@ impl FwSimConfig {
                 altitude: alt,
                 course: 0.0,
             },
+            atmosphere: AtmosphereConfig::calm(),
             start_manual: manual,
             fbw_enabled: true,
         }
@@ -170,16 +174,19 @@ enum FwMode {
 
 /// A deterministic fixed-wing simulator: autopilot → aero wrench → RK4.
 ///
-/// Flies in still air: the plant's `fixedwing_wrench` supports a wind field, but
-/// the truth-feedback autopilot has no way to separate airspeed from ground speed
-/// without an airspeed sensor, so wind (and Dryden turbulence) are deferred to
-/// the same future work that adds sensors to this loop.
+/// The aircraft flies through an [`Atmosphere`] (wind + Dryden turbulence); in
+/// calm air this is a no-op and the run is bit-for-bit what it was before. The
+/// autopilot still flies on **truth** (it has no airspeed sensor, so a steady
+/// wind makes it crab rather than hold a heading); the manual fly-by-wire fighter
+/// feels the gusts directly through its angle-of-attack feedback.
 pub struct FwSim {
     truth: State13,
     params: FixedWingParams,
     autopilot: Box<dyn FixedWingController>,
     /// Fly-by-wire tuning (used to build the manual mode on demand).
     fbw_cfg: FbwConfig,
+    /// The air the aircraft flies through.
+    atmosphere: Atmosphere,
     /// Last setpoint actually applied to the autopilot (logged each sample).
     setpoint: FixedWingSetpoint,
     /// Setpoint-hold / route-follow / manual (selects how `step` builds surfaces).
@@ -210,6 +217,7 @@ impl FwSim {
             params: cfg.params,
             autopilot: Box::new(FixedWingAutopilot::new(cfg.autopilot)),
             fbw_cfg: cfg.fbw,
+            atmosphere: Atmosphere::new(cfg.atmosphere),
             setpoint: cfg.setpoint,
             mode,
             controls: FixedWingControls::zero(),
@@ -324,6 +332,26 @@ impl FwSim {
         self.truth.angular_rate += delta_body;
     }
 
+    /// Set the steady wind \[m/s, local NED\].
+    pub fn set_wind(&mut self, wind_ned: Vec3) {
+        self.atmosphere.set_wind(wind_ned);
+    }
+
+    /// Set the turbulence intensity (RMS gust \[m/s\]; 0 = calm).
+    pub fn set_turbulence(&mut self, rms: Real) {
+        self.atmosphere.set_turbulence(rms);
+    }
+
+    /// Steady wind speed \[m/s\] (for the HUD).
+    pub fn wind_speed(&self) -> Real {
+        self.atmosphere.wind_speed()
+    }
+
+    /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
+    pub fn gust(&self) -> Real {
+        self.atmosphere.gust_magnitude()
+    }
+
     /// The active commanded setpoint (route-derived when following a route).
     pub fn setpoint(&self) -> FixedWingSetpoint {
         self.setpoint
@@ -393,6 +421,15 @@ impl FwSim {
             .clamp(&self.params.limits);
         }
 
+        // Wind in the world (PCI) frame: advance the atmosphere exactly once per
+        // physics step (never inside RK4 — that would over-sample the turbulence)
+        // and hold it constant across the sub-steps. The steady wind + gust are in
+        // local NED, so rotate them into PCI at the current position.
+        let wind_ned = self
+            .atmosphere
+            .wind_ned(self.truth.velocity.norm(), self.dt);
+        let wind_world = planet::pci_from_ned(self.truth.position) * wind_ned;
+
         let p = &self.params;
         let c = self.controls;
         self.truth = Rk4.step(
@@ -400,7 +437,7 @@ impl FwSim {
             |x| {
                 rigid_body_deriv(
                     x,
-                    &fixedwing_wrench(x, p, &c, Vec3::zeros(), planet::gravity_at(x.position)),
+                    &fixedwing_wrench(x, p, &c, wind_world, planet::gravity_at(x.position)),
                     p.mass,
                     &p.inertia,
                     &p.inertia_inv,
@@ -934,6 +971,78 @@ mod tests {
                 .all(|x| x.is_finite()),
             "state should stay finite over the run"
         );
+        assert_eq!(a.position, b.position);
+        assert_eq!(a.velocity, b.velocity);
+        assert_eq!(a.attitude, b.attitude);
+        assert_eq!(a.angular_rate, b.angular_rate);
+    }
+
+    // --- Weather (wind + turbulence) ---
+
+    /// The fighter, FCS on, neutral stick at trim throttle, flying through the
+    /// given air (steady wind \[m/s, NED\] + turbulence RMS).
+    fn fighter_in_weather(wind_ned: Vec3, turbulence: Real) -> FwSim {
+        let mut cfg = FwSimConfig::fighter_manual(300.0);
+        cfg.atmosphere = AtmosphereConfig::wind(wind_ned, turbulence);
+        let trim_throttle = cfg.fbw.throttle_trim;
+        let mut sim = FwSim::new(cfg);
+        sim.set_stick(StickInput {
+            pitch: 0.0,
+            roll: 0.0,
+            yaw: 0.0,
+            throttle: trim_throttle,
+        });
+        sim
+    }
+
+    // A steady wind moves the air the aircraft flies through, so the trajectory
+    // measurably differs from calm (here a 6 m/s downdraft).
+    #[test]
+    fn wind_changes_the_trajectory() {
+        let mut calm = fighter_in_weather(Vec3::zeros(), 0.0);
+        let mut windy = fighter_in_weather(Vec3::new(0.0, 0.0, 6.0), 0.0);
+        calm.run_headless(8000); // 8 s
+        windy.run_headless(8000);
+        let dpos = (windy.truth().position - calm.truth().position).norm();
+        assert!(
+            dpos > 20.0,
+            "a 6 m/s wind should measurably alter the path: {dpos} m"
+        );
+    }
+
+    // Moderate turbulence shoves the fighter around, but the fly-by-wire keeps it
+    // controlled — it never tumbles and stays roughly on altitude.
+    #[test]
+    fn turbulence_keeps_the_fighter_controlled() {
+        let mut sim = fighter_in_weather(Vec3::zeros(), 3.0);
+        let mut worst = 0.0_f64;
+        for _ in 0..12_000 {
+            sim.step();
+            worst = worst.max(sim.truth().angular_rate.norm());
+        }
+        assert!(sim.gust() > 0.0, "turbulence should be active");
+        assert!(
+            worst < 1.2,
+            "FBW should keep the fighter controlled in turbulence: {worst} rad/s"
+        );
+        assert!(
+            (sim.altitude() - 300.0).abs() < 150.0,
+            "should not depart in turbulence: {} m",
+            sim.altitude()
+        );
+    }
+
+    // T-WeatherDeterminism: wind + seeded turbulence is reproducible bit-for-bit.
+    #[test]
+    fn weather_is_deterministic() {
+        let run = || {
+            let mut sim = fighter_in_weather(Vec3::new(-4.0, 3.0, 0.0), 4.0);
+            sim.run_headless(6000);
+            *sim.truth()
+        };
+        let a = run();
+        let b = run();
+        assert!(a.position.iter().all(|x| x.is_finite()));
         assert_eq!(a.position, b.position);
         assert_eq!(a.velocity, b.velocity);
         assert_eq!(a.attitude, b.attitude);

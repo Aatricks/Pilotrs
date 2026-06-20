@@ -70,6 +70,9 @@ struct Ui {
     // Fixed-wing manual cruise.
     fw_airspeed: f32,
     fw_altitude: f32,
+    // Weather (fixed-wing): steady wind speed + turbulence RMS [m/s].
+    wind_speed: f32,
+    turbulence: f32,
     /// True while a drawn route is installed on the fixed-wing engine — gates
     /// off the per-frame manual `SetCruise` so it can't cancel the route
     /// (synchronous; avoids racing the lagging snapshot).
@@ -467,6 +470,8 @@ fn main() {
         thrust: hover as f32,
         fw_airspeed: 25.0,
         fw_altitude: 400.0, // above the ~320 m mountain peaks
+        wind_speed: 0.0,
+        turbulence: 0.0,
         fw_route_on: false,
         paused: false,
         speed: 1.0,
@@ -526,6 +531,13 @@ fn main() {
                 AircraftKind::FixedWing => {
                     source.fw_command(FwCommand::Pause(ui.paused));
                     source.fw_command(FwCommand::SetSpeed(ui.speed as f64));
+                    // Weather: a crosswind toward the east + turbulence.
+                    source.fw_command(FwCommand::SetWind(fsim_sim::Vec3::new(
+                        0.0,
+                        ui.wind_speed as f64,
+                        0.0,
+                    )));
+                    source.fw_command(FwCommand::SetTurbulence(ui.turbulence as f64));
                     if ui.fighter {
                         // Pilot in the loop: drive the fly-by-wire from the stick.
                         // The F-key/gamepad edge flips our authoritative intent.
@@ -871,6 +883,14 @@ fn controls_window(
                         ui.monospace(format!("flying route — leg {idx}"));
                     }
                 }
+                if st.fixed_wing {
+                    ui.separator();
+                    ui.label("weather");
+                    ui.add(egui::Slider::new(&mut st.wind_speed, 0.0..=15.0).text("wind (m/s)"));
+                    ui.add(
+                        egui::Slider::new(&mut st.turbulence, 0.0..=8.0).text("turbulence (m/s)"),
+                    );
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut st.paused, "pause");
@@ -1004,6 +1024,12 @@ fn hud_overlay(ctx: &egui::Context, view: &ViewSnapshot, has_gamepad: bool) {
                 ui.monospace(format!("load     {:6.2} g", view.load_factor));
                 ui.monospace(format!("pitch    {:6.1} deg", pitch.to_degrees()));
                 ui.monospace(format!("roll     {:6.1} deg", roll.to_degrees()));
+                if view.wind_speed > 0.1 || view.gust > 0.1 {
+                    ui.monospace(format!(
+                        "wind {:4.1}  gust {:4.1} m/s",
+                        view.wind_speed, view.gust
+                    ));
+                }
                 ui.monospace(format!(
                     "input    {}",
                     if has_gamepad { "gamepad" } else { "keyboard" }

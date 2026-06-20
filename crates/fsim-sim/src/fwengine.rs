@@ -15,7 +15,7 @@ use crate::fixedwing::{FwSample, FwSim, FwSimConfig};
 use crate::fw_guidance::FwGuidanceConfig;
 use crate::guidance::Waypoint;
 use fsim_control::FixedWingSetpoint;
-use fsim_core::{FixedWingControls, Real, State13, StickInput, Tick};
+use fsim_core::{FixedWingControls, Real, State13, StickInput, Tick, Vec3};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -43,6 +43,10 @@ pub struct FwSnapshot {
     pub manual: bool,
     /// Fly-by-wire FCS engaged (only meaningful when `manual`).
     pub fbw_on: bool,
+    /// Steady wind speed \[m/s\] (for the HUD).
+    pub wind_speed: Real,
+    /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
+    pub gust: Real,
     pub paused: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
     /// from `tick`, which only advances when the physics steps).
@@ -65,6 +69,8 @@ impl FwSnapshot {
             load_factor: sim.load_factor(),
             manual: sim.is_manual(),
             fbw_on: sim.fbw_on(),
+            wind_speed: sim.wind_speed(),
+            gust: sim.gust(),
             paused,
             seq,
         }
@@ -109,6 +115,10 @@ pub enum FwCommand {
     SetStick(StickInput),
     /// Toggle the fly-by-wire FCS on/off (manual mode only).
     SetFbw(bool),
+    /// Set the steady wind \[m/s, local NED\].
+    SetWind(Vec3),
+    /// Set the turbulence intensity (RMS gust \[m/s\]; 0 = calm).
+    SetTurbulence(Real),
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -268,6 +278,8 @@ impl Worker {
             FwCommand::EnterManual(fbw_on) => self.sim.enter_manual(fbw_on),
             FwCommand::SetStick(s) => self.sim.set_stick(s),
             FwCommand::SetFbw(on) => self.sim.set_fbw(on),
+            FwCommand::SetWind(w) => self.sim.set_wind(w),
+            FwCommand::SetTurbulence(rms) => self.sim.set_turbulence(rms),
             FwCommand::Pause(p) => self.paused = p,
             FwCommand::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             FwCommand::Reset(cfg) => {
