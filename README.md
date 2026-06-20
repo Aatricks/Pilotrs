@@ -13,23 +13,19 @@ spherical, 1/1000-scale Earth.
 <p align="center">
   <img src="docs/screenshot.png" alt="Pilotrs — hand-flying the fly-by-wire fighter over the 1/1000-scale Earth" width="640">
 </p>
-<p align="center"><em>Hand-flying the relaxed-stability fighter over the globe — flip the flight-control system off (<code>F</code>) and the unstable airframe departs in under a second.</em></p>
+<p align="center"><em>Hand-flying the relaxed-stability fighter over the globe — flip the flight-control system off (<code>F</code>) and the unstable airframe departs in under a second (about 0.34s which is comparable to an f16's 0.3s divergency rate).</em></p>
 
 The defining constraint: **the autopilot never sees ground truth.** It flies on
-noisy, degraded sensor measurements fused by an onboard estimator — which is what
-makes this a real estimation-and-control problem rather than a kinematics demo.
+noisy, degraded sensor measurements fused by an onboard estimator.
 
 Built on [`nalgebra`](https://nalgebra.org), kept **`no_std`-clean** in the
 flight-control core (so it can target embedded / Ferrocene toolchains), and
 visualized with [`three-d`](https://github.com/asny/three-d) +
 [`egui`](https://github.com/emilk/egui).
 
-```
-truth ─▶ SENSORS ─────▶ ESTIMATOR ───────▶ CONTROLLER ─────▶ MIXER + MOTORS ─▶ DYNAMICS ─▶ RK4 ─▶ truth'
- ▲    (IMU/GPS/baro/mag) (complementary /    (cascaded PID /   (X-mixer +        (Newton-     (1 kHz)  │
- └──────────────────────  quaternion MEKF /   LQR, position +   motor lag)        Euler EOM) ───────────┘
-                          15-state INS)        waypoints)
-```
+<p align="center">
+  <img src="docs/diagram.svg" alt="Diagram of the simulation modules interactions" width="640">
+</p>
 
 The controller and estimator consume **only** the estimator's output, never truth,
 so the estimate-vs-truth plots in the viewer actually mean something.
@@ -91,23 +87,6 @@ so the estimate-vs-truth plots in the viewer actually mean something.
 Everything is **deterministic** — fixed timestep, no wall-clock in the math, one
 seeded RNG per sensor — so a run reproduces bit-for-bit.
 
-## Workspace layout
-
-The `fsim-core → … → fsim-control` crates form a **`no_std`-clean flight-control
-ring** (they build with `--no-default-features`); everything OS/GPU-bound lives only
-in `fsim-viz`.
-
-| Crate | Role |
-|-------|------|
-| `fsim-core` | `State13`, frame/quaternion conventions, shared message types, and the spherical-world math. The contract every other crate imports. |
-| `fsim-dynamics` | Shared Newton-Euler EOM + RK4 with per-step renormalization; the quadrotor plant and the fixed-wing aero model + trim. |
-| `fsim-actuators` | Quadrotor control-allocation mixer + first-order motor model. |
-| `fsim-sensors` | `Sensor` trait + IMU / GPS / barometer / magnetometer models, each with its own seeded noise and bias random-walk. |
-| `fsim-estimator` | `Estimator` trait + complementary filter, quaternion MEKF, and 15-state INS. |
-| `fsim-control` | `Controller` trait + cascaded PID, LQR, position/velocity control, the fixed-wing autopilot, and the fly-by-wire stability system. |
-| `fsim-sim` | Deterministic scheduler, waypoint guidance, threaded engine, record/replay, Monte-Carlo, and the fixed-wing / manual-flight simulation. |
-| `fsim-viz` | Interactive `three-d` + `egui` viewer with keyboard/gamepad input (std-only leaf crate). |
-
 ## Conventions
 
 Defined once in `fsim-core`:
@@ -168,11 +147,6 @@ subscription token is configured:
 ```bash
 criticalup auth set && criticalup install && criticalup run cargo build
 ```
-
-## Possible extensions
-
-Sensors and the INS in the fixed-wing loop; wind and turbulence modeling (Dryden);
-orbit / Dubins guidance; and model-predictive control behind the `Controller` trait.
 
 ## License
 
