@@ -30,7 +30,7 @@ pub use batch::{
 };
 pub use config::{ControllerKind, EstimatorKind, SimConfig};
 pub use engine::{Command, EngineClosed, LoggingCfg, RunMode, RunReport, SimEngine, Snapshot};
-pub use faults::{FwFaults, QuadFaults, SurfaceFault};
+pub use faults::{FwFaults, QuadFaults, SensorFault, SensorFaults, SurfaceFault};
 pub use fixedwing::{cross_track, line_course, FwSample, FwSim, FwSimConfig};
 pub use fw_guidance::{FwGuidance, FwGuidanceConfig, TerminalAction};
 pub use fwengine::{FwCommand, FwEngine, FwLoggingCfg, FwRunMode, FwRunReport, FwSnapshot};

@@ -105,22 +105,87 @@ impl FwFaults {
     }
 }
 
-/// Quadrotor effector faults.
+/// What's wrong with one sensor (feeding the estimator).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SensorFault {
+    /// Working normally.
+    Normal,
+    /// Dead — produces nothing, so the estimator gets no update from it.
+    Dropout,
+    /// Frozen at its last reading.
+    Stuck,
+    /// A constant offset on its primary channel (gyro / position / altitude /
+    /// field), units per sensor.
+    Bias(Real),
+}
+
+impl SensorFault {
+    pub fn is_dropout(self) -> bool {
+        matches!(self, Self::Dropout)
+    }
+    pub fn is_stuck(self) -> bool {
+        matches!(self, Self::Stuck)
+    }
+    /// The bias offset (0 unless `Bias`).
+    pub fn bias(self) -> Real {
+        if let Self::Bias(b) = self {
+            b
+        } else {
+            0.0
+        }
+    }
+    fn is_faulted(self) -> bool {
+        !matches!(self, Self::Normal)
+    }
+}
+
+/// The quad's sensor faults (the fixed-wing flies on truth, so it has none).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SensorFaults {
+    pub imu: SensorFault,
+    pub gps: SensorFault,
+    pub baro: SensorFault,
+    pub mag: SensorFault,
+}
+
+impl SensorFaults {
+    pub fn none() -> Self {
+        Self {
+            imu: SensorFault::Normal,
+            gps: SensorFault::Normal,
+            baro: SensorFault::Normal,
+            mag: SensorFault::Normal,
+        }
+    }
+    pub fn any(&self) -> bool {
+        self.imu.is_faulted()
+            || self.gps.is_faulted()
+            || self.baro.is_faulted()
+            || self.mag.is_faulted()
+    }
+}
+
+/// Quadrotor faults: a dead rotor plus any sensor faults.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuadFaults {
     /// A dead rotor: this motor index (0..3) produces no thrust.
     pub dead_rotor: Option<usize>,
+    /// Sensor faults feeding the estimator.
+    pub sensors: SensorFaults,
 }
 
 impl QuadFaults {
     /// A healthy aircraft.
     pub fn none() -> Self {
-        Self { dead_rotor: None }
+        Self {
+            dead_rotor: None,
+            sensors: SensorFaults::none(),
+        }
     }
 
     /// True if anything is broken.
     pub fn any(&self) -> bool {
-        self.dead_rotor.is_some()
+        self.dead_rotor.is_some() || self.sensors.any()
     }
 
     /// Zero out a dead rotor's thrust.
@@ -189,8 +254,19 @@ mod tests {
     fn dead_rotor_zeros_one_motor() {
         let f = QuadFaults {
             dead_rotor: Some(2),
+            ..QuadFaults::none()
         };
         assert_eq!(f.apply_motors([1.0, 1.0, 1.0, 1.0]), [1.0, 1.0, 0.0, 1.0]);
         assert!(!QuadFaults::none().any());
+    }
+
+    #[test]
+    fn sensor_faults_report_breakage() {
+        let mut s = SensorFaults::none();
+        assert!(!s.any());
+        s.gps = SensorFault::Dropout;
+        assert!(s.any() && s.gps.is_dropout());
+        assert_eq!(SensorFault::Bias(3.0).bias(), 3.0);
+        assert_eq!(SensorFault::Normal.bias(), 0.0);
     }
 }

@@ -32,8 +32,8 @@ mod terrain;
 use fsim_sim::planet;
 use fsim_sim::{
     Command, ControllerKind, FixedWingSetpoint, FwCommand, FwFaults, FwGuidanceConfig, FwSample,
-    FwSimConfig, GuidanceConfig, QuadFaults, Quat, Recording, Setpoint, SimConfig, SurfaceFault,
-    TelemetrySample, Waypoint,
+    FwSimConfig, GuidanceConfig, QuadFaults, Quat, Recording, SensorFault, SensorFaults, Setpoint,
+    SimConfig, SurfaceFault, TelemetrySample, Waypoint,
 };
 use input::StickSource;
 use minimap::{Minimap, MinimapActions, MinimapView, Route, TerrainLike};
@@ -77,6 +77,7 @@ struct Ui {
     // Injected faults (sent to the live engine each frame).
     fw_faults: FwFaults,
     quad_dead_rotor: Option<usize>,
+    quad_sensors: SensorFaults,
     /// True while a drawn route is installed on the fixed-wing engine — gates
     /// off the per-frame manual `SetCruise` so it can't cancel the route
     /// (synchronous; avoids racing the lagging snapshot).
@@ -480,6 +481,7 @@ fn main() {
         turbulence: 0.0,
         fw_faults: FwFaults::none(),
         quad_dead_rotor: None,
+        quad_sensors: SensorFaults::none(),
         fw_route_on: false,
         paused: false,
         speed: 1.0,
@@ -535,6 +537,7 @@ fn main() {
                     source.quad_command(Command::SetTurbulence(ui.turbulence as f64));
                     source.quad_command(Command::SetFaults(QuadFaults {
                         dead_rotor: ui.quad_dead_rotor,
+                        sensors: ui.quad_sensors,
                     }));
                     let in_mission = ui.mission_on && ui.est_kind == 2;
                     if !in_mission {
@@ -948,10 +951,36 @@ fn controls_window(
                                 st.quad_dead_rotor = Some(i);
                             }
                         }
-                        if ui.button("repair").clicked() {
-                            st.quad_dead_rotor = None;
-                        }
                     });
+                    // Sensor faults — most visible on the INS estimate-vs-truth plots.
+                    sensor_checkbox(
+                        ui,
+                        "GPS dropout",
+                        &mut st.quad_sensors.gps,
+                        SensorFault::Dropout,
+                    );
+                    sensor_checkbox(
+                        ui,
+                        "baro dropout",
+                        &mut st.quad_sensors.baro,
+                        SensorFault::Dropout,
+                    );
+                    sensor_checkbox(
+                        ui,
+                        "mag dropout",
+                        &mut st.quad_sensors.mag,
+                        SensorFault::Dropout,
+                    );
+                    sensor_checkbox(
+                        ui,
+                        "gyro bias",
+                        &mut st.quad_sensors.imu,
+                        SensorFault::Bias(0.05),
+                    );
+                    if ui.button("repair").clicked() {
+                        st.quad_dead_rotor = None;
+                        st.quad_sensors = SensorFaults::none();
+                    }
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -1069,6 +1098,14 @@ fn jam_checkbox(ui: &mut egui::Ui, label: &str, surf: &mut SurfaceFault) {
         } else {
             SurfaceFault::Normal
         };
+    }
+}
+
+/// A checkbox that applies `on_fault` to a sensor (on) or clears it (off).
+fn sensor_checkbox(ui: &mut egui::Ui, label: &str, sf: &mut SensorFault, on_fault: SensorFault) {
+    let mut on = *sf != SensorFault::Normal;
+    if ui.checkbox(&mut on, label).changed() {
+        *sf = if on { on_fault } else { SensorFault::Normal };
     }
 }
 

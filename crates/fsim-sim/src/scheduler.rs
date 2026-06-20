@@ -8,7 +8,9 @@ use crate::guidance::{Guidance, GuidanceConfig, Waypoint};
 use crate::telemetry::{Telemetry, TelemetrySample};
 use fsim_actuators::{Mixer, MotorModel, XQuadMixer};
 use fsim_control::{CascadedPid, Controller, LqrController, PositionConfig, PositionController};
-use fsim_core::{CtrlCmd, EstState, Real, Setpoint, State13, Tick, Vec3};
+use fsim_core::{
+    BaroMeas, CtrlCmd, EstState, GpsMeas, ImuMeas, MagMeas, Real, Setpoint, State13, Tick, Vec3,
+};
 use fsim_dynamics::{aerodynamic_wrench, Integrator, MultirotorParams, Plant, RigidBody, Rk4};
 use fsim_estimator::{ComplementaryFilter, Estimator, Ins, Mekf};
 use fsim_sensors::{Baro, Gps, Imu, Mag, Sensor, Truth};
@@ -58,8 +60,13 @@ pub struct Sim {
     rk4: Rk4,
     /// The air the quad flies through (wind + turbulence).
     atmosphere: Atmosphere,
-    /// Injected effector faults (a dead rotor).
+    /// Injected effector + sensor faults.
     faults: QuadFaults,
+    /// Last measurement per sensor (for a "stuck" sensor fault).
+    last_imu: Option<ImuMeas>,
+    last_gps: Option<GpsMeas>,
+    last_baro: Option<BaroMeas>,
+    last_mag: Option<MagMeas>,
 
     truth: State13,
     setpoint: Setpoint,
@@ -141,6 +148,10 @@ impl Sim {
             rk4: Rk4,
             atmosphere: Atmosphere::new(cfg.atmosphere),
             faults: QuadFaults::none(),
+            last_imu: None,
+            last_gps: None,
+            last_baro: None,
+            last_mag: None,
 
             truth: State13::at_rest(),
             setpoint: Setpoint::level(hover),
@@ -336,21 +347,45 @@ impl Sim {
             accel_world,
             t,
         };
-        if self.tick.is_multiple_of(self.imu_period) {
-            let imu_meas = self.imu.sample(&bundle);
-            self.estimator.predict(&imu_meas, self.imu_dt);
+        // Sensor faults degrade each measurement on its way to the estimator: a
+        // dropout skips the update, a stuck sensor repeats its last reading, and a
+        // bias adds a constant offset to its primary channel.
+        let sf = self.faults.sensors;
+        if self.tick.is_multiple_of(self.imu_period) && !sf.imu.is_dropout() {
+            let mut m = match (sf.imu.is_stuck(), self.last_imu) {
+                (true, Some(last)) => last,
+                _ => self.imu.sample(&bundle),
+            };
+            m.gyro.z += sf.imu.bias(); // a yaw-rate bias
+            self.last_imu = Some(m);
+            self.estimator.predict(&m, self.imu_dt);
         }
-        if self.tick.is_multiple_of(self.mag_period) {
-            let mag_meas = self.mag.sample(&bundle);
-            self.estimator.update_mag(&mag_meas);
+        if self.tick.is_multiple_of(self.mag_period) && !sf.mag.is_dropout() {
+            let mut m = match (sf.mag.is_stuck(), self.last_mag) {
+                (true, Some(last)) => last,
+                _ => self.mag.sample(&bundle),
+            };
+            m.field.x += sf.mag.bias();
+            self.last_mag = Some(m);
+            self.estimator.update_mag(&m);
         }
-        if self.tick.is_multiple_of(self.baro_period) {
-            let baro_meas = self.baro.sample(&bundle);
-            self.estimator.update_baro(&baro_meas);
+        if self.tick.is_multiple_of(self.baro_period) && !sf.baro.is_dropout() {
+            let mut m = match (sf.baro.is_stuck(), self.last_baro) {
+                (true, Some(last)) => last,
+                _ => self.baro.sample(&bundle),
+            };
+            m.altitude += sf.baro.bias();
+            self.last_baro = Some(m);
+            self.estimator.update_baro(&m);
         }
-        if self.tick.is_multiple_of(self.gps_period) {
-            let gps_meas = self.gps.sample(&bundle);
-            self.estimator.update_gps(&gps_meas);
+        if self.tick.is_multiple_of(self.gps_period) && !sf.gps.is_dropout() {
+            let mut m = match (sf.gps.is_stuck(), self.last_gps) {
+                (true, Some(last)) => last,
+                _ => self.gps.sample(&bundle),
+            };
+            m.position.x += sf.gps.bias(); // a north-position bias
+            self.last_gps = Some(m);
+            self.estimator.update_gps(&m);
         }
 
         // 3. Controller (at the control rate), acting on the estimate only.
@@ -799,6 +834,7 @@ mod tests {
         );
         sim.set_faults(crate::QuadFaults {
             dead_rotor: Some(0),
+            ..crate::QuadFaults::none()
         });
         assert!(sim.faulted());
         sim.run_headless(3000); // 3 s on three motors
@@ -806,6 +842,35 @@ mod tests {
             sim.truth().attitude.angle() > 0.5,
             "a dead rotor should upset the quad: {} rad",
             sim.truth().attitude.angle()
+        );
+    }
+
+    /// INS position-estimate error vs truth after 10 s with the given sensor
+    /// faults (injected after the filter has settled).
+    fn ins_position_error(sf: crate::SensorFaults) -> Real {
+        let mut sim = Sim::new(SimConfig::quad_250_m3()); // the INS
+        sim.run_headless(3000); // settle: the GPS converges the estimate
+        sim.set_faults(crate::QuadFaults {
+            dead_rotor: None,
+            sensors: sf,
+        });
+        sim.run_headless(10_000); // 10 s with the fault
+        (sim.truth().position - sim.estimate().position).norm()
+    }
+
+    // With the GPS dead, the INS loses its position correction and dead-reckons
+    // off the noisy accelerometer — the estimate drifts away from truth, where a
+    // healthy GPS would have pinned it.
+    #[test]
+    fn gps_dropout_drifts_the_ins() {
+        let healthy = ins_position_error(crate::SensorFaults::none());
+        let dropout = ins_position_error(crate::SensorFaults {
+            gps: crate::SensorFault::Dropout,
+            ..crate::SensorFaults::none()
+        });
+        assert!(
+            dropout > healthy + 2.0,
+            "GPS dropout should drift the INS: healthy {healthy:.1} m vs dropout {dropout:.1} m"
         );
     }
 }
