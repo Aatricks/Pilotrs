@@ -58,17 +58,26 @@ impl FwSimConfig {
     /// velocity/attitude are rotated from local NED into PCI, so the aircraft
     /// begins in level cruise tangent to the planet, flying North.
     pub fn aerosonde_at(alt: Real) -> Self {
-        let params = FixedWingParams::aerosonde();
-        Self::from_trim(params, alt, false)
+        // The Aerosonde is a slow UAV — its real ~25 m/s cruise.
+        Self::from_trim(FixedWingParams::aerosonde(), alt, false, 25.0)
     }
+
+    /// Cruise speed the fighter spawns trimmed at \[m/s\]. A brisk 50 m/s (vs the
+    /// Aerosonde's sluggish 25) — well inside the airframe's ~76 m/s level-flight
+    /// envelope, so the pilot still has throttle headroom to push faster.
+    pub const FIGHTER_CRUISE: Real = 50.0;
 
     /// The **relaxed-stability fighter** under manual fly-by-wire control,
     /// spawned in level trimmed flight at altitude `alt` \[m\]. It starts with the
     /// FCS **on** (flyable); toggling it off lets the unstable airframe diverge.
     /// Plenty of altitude is sensible so the tumble has room when the FCS is off.
     pub fn fighter_manual(alt: Real) -> Self {
-        let params = FixedWingParams::fighter_relaxed();
-        Self::from_trim(params, alt, true)
+        Self::from_trim(
+            FixedWingParams::fighter_relaxed(),
+            alt,
+            true,
+            Self::FIGHTER_CRUISE,
+        )
     }
 
     /// The fighter at a default 300 m.
@@ -76,11 +85,12 @@ impl FwSimConfig {
         Self::fighter_manual(300.0)
     }
 
-    /// Build a config by solving 25 m/s level trim for `params`, placing it on
-    /// the sphere at `alt`, and deriving the fly-by-wire trim references from the
-    /// same trim. `manual` selects whether the sim starts piloted (FCS on).
-    fn from_trim(params: FixedWingParams, alt: Real, manual: bool) -> Self {
-        let tr = trim(&params, 25.0, 0.0).expect("25 m/s level trim converges");
+    /// Build a config by solving `cruise` m/s level trim for `params`, placing it
+    /// on the sphere at `alt`, and deriving the fly-by-wire trim references (and
+    /// gain-schedule reference speed) from the same trim. `manual` selects whether
+    /// the sim starts piloted (FCS on).
+    fn from_trim(params: FixedWingParams, alt: Real, manual: bool, cruise: Real) -> Self {
+        let tr = trim(&params, cruise, 0.0).expect("level trim converges");
         let mut autopilot = FixedWingConfig::aerosonde();
         autopilot.trim_throttle = tr.controls.throttle;
         // Trim angle of attack (flat local trim, before placement on the sphere).
@@ -90,7 +100,7 @@ impl FwSimConfig {
             alpha_trim,
             tr.controls.elevator,
             tr.controls.throttle,
-            25.0,
+            cruise, // gain-schedule reference = the cruise speed
             params.rho,
             params.limits,
         );
@@ -103,7 +113,7 @@ impl FwSimConfig {
             control_rate: 100.0,
             initial,
             setpoint: FixedWingSetpoint {
-                airspeed: 25.0,
+                airspeed: cruise,
                 altitude: alt,
                 course: 0.0,
             },
@@ -784,13 +794,15 @@ mod tests {
     /// over `secs` seconds. The external kick is what makes the FCS *do work* — an
     /// FBW that ignored the airframe would fail to recover.
     fn fighter_upset_response(fbw_on: bool, secs: f64) -> (Real, Real) {
-        let mut sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+        let cfg = FwSimConfig::fighter_manual(300.0);
+        let trim_throttle = cfg.fbw.throttle_trim; // hold the cruise speed
+        let mut sim = FwSim::new(cfg);
         sim.set_fbw(fbw_on);
         sim.set_stick(StickInput {
             pitch: 0.0,
             roll: 0.0,
             yaw: 0.0,
-            throttle: 0.55, // near the trim throttle so it holds airspeed
+            throttle: trim_throttle,
         });
         sim.step(); // one gate so the throttle is applied
         sim.nudge_angular_rate(Vec3::new(0.0, 0.3, 0.0)); // 0.3 rad/s pitch upset
@@ -845,11 +857,12 @@ mod tests {
     // ~1 g (level cruise); both getters must reflect that.
     #[test]
     fn fighter_alpha_and_load_factor_readouts() {
-        let sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
-        // Trim AoA for the fighter at 25 m/s level is ≈ 0.1 rad.
+        let cfg = FwSimConfig::fighter_manual(300.0);
+        let alpha_trim = cfg.fbw.alpha_trim; // small (and slightly negative at fast cruise)
+        let sim = FwSim::new(cfg);
         assert!(
-            (0.05..0.15).contains(&sim.alpha()),
-            "AoA at spawn should be near trim: {}",
+            (sim.alpha() - alpha_trim).abs() < 0.02,
+            "AoA at spawn should match the trim AoA {alpha_trim}: {}",
             sim.alpha()
         );
         // Level cruise ⇒ lift ≈ weight ⇒ load factor ≈ 1 g.
@@ -864,12 +877,14 @@ mod tests {
     // aircraft tracks the stick) without diverging.
     #[test]
     fn fbw_tracks_a_pitch_command() {
-        let mut sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+        let cfg = FwSimConfig::fighter_manual(300.0);
+        let trim_throttle = cfg.fbw.throttle_trim;
+        let mut sim = FwSim::new(cfg);
         sim.set_stick(StickInput {
             pitch: 0.6, // pull back
             roll: 0.0,
             yaw: 0.0,
-            throttle: 0.55,
+            throttle: trim_throttle,
         });
         let mut peak_q = 0.0_f64;
         for _ in 0..1500 {

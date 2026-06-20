@@ -320,7 +320,13 @@ pub fn trim(p: &FixedWingParams, va: Real, gamma: Real) -> Option<Trim> {
         Vec3::new(a_body.x, a_body.z, d.d_angular_rate.y)
     };
 
-    let mut x = Vec3::new(gamma, 0.0, 0.5);
+    // Start the throttle *above* the propeller's thrust dead-zone for this speed:
+    // thrust is zero until `kmotor·δt > Va`, and in that flat region `∂T/∂δt = 0`,
+    // so the throttle column of the forward-difference Jacobian vanishes and Newton
+    // stalls. Beginning above the knee lets fast cruises (where the dead-zone is
+    // wide) converge; for slow flight it clamps back to a sane mid-throttle.
+    let dt0 = (va / p.kmotor + 0.15).clamp(0.3, 0.9);
+    let mut x = Vec3::new(gamma, 0.0, dt0);
     for _ in 0..50 {
         let r = residual(&x);
         if r.norm() < 1e-12 {
