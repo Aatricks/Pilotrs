@@ -54,6 +54,8 @@ pub struct ViewSnapshot {
     pub storm: Real,
     /// A fault is active (for the HUD).
     pub faulted: bool,
+    /// The aircraft has crashed into the terrain.
+    pub crashed: bool,
 }
 
 impl ViewSnapshot {
@@ -75,6 +77,7 @@ impl ViewSnapshot {
             gust: s.gust,
             storm: s.storm,
             faulted: s.faulted,
+            crashed: s.crashed,
         }
     }
 
@@ -96,6 +99,7 @@ impl ViewSnapshot {
             gust: s.gust,
             storm: s.storm,
             faulted: s.faulted,
+            crashed: s.crashed,
         }
     }
 

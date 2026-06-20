@@ -45,6 +45,8 @@ pub struct Snapshot {
     pub storm: Real,
     /// A fault is active (for the HUD).
     pub faulted: bool,
+    /// The aircraft has crashed into the terrain.
+    pub crashed: bool,
     pub paused: bool,
     pub recording: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
@@ -70,6 +72,7 @@ impl Snapshot {
             gust: sim.gust(),
             storm: sim.storm_intensity(),
             faulted: sim.faulted(),
+            crashed: sim.crashed(),
             paused,
             recording,
             seq,
@@ -100,6 +103,7 @@ impl Snapshot {
             gust: 0.0,
             storm: 0.0,
             faulted: false,
+            crashed: false,
             paused: false,
             recording: false,
             seq: 0,
@@ -142,6 +146,8 @@ pub enum Command {
     SetStorm(Option<StormCell>),
     /// Inject (or clear) effector faults (a dead rotor).
     SetFaults(QuadFaults),
+    /// Crash into the terrain (the viewer triggers this on impact).
+    Crash,
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -343,6 +349,7 @@ impl Worker {
             Command::SetTurbulence(rms) => self.sim.set_turbulence(rms),
             Command::SetStorm(s) => self.sim.set_storm(s),
             Command::SetFaults(f) => self.sim.set_faults(f),
+            Command::Crash => self.sim.crash(),
             Command::Pause(p) => self.paused = p,
             Command::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             Command::Reset(cfg) => {

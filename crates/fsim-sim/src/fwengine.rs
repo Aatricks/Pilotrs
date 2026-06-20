@@ -53,6 +53,8 @@ pub struct FwSnapshot {
     pub storm: Real,
     /// A fault is active (for the HUD).
     pub faulted: bool,
+    /// The aircraft has crashed into the terrain.
+    pub crashed: bool,
     pub paused: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
     /// from `tick`, which only advances when the physics steps).
@@ -79,6 +81,7 @@ impl FwSnapshot {
             gust: sim.gust(),
             storm: sim.storm_intensity(),
             faulted: sim.faulted(),
+            crashed: sim.crashed(),
             paused,
             seq,
         }
@@ -131,6 +134,8 @@ pub enum FwCommand {
     SetStorm(Option<StormCell>),
     /// Inject (or clear) effector / powerplant faults.
     SetFaults(FwFaults),
+    /// Crash the aircraft into the terrain (the viewer triggers this on impact).
+    Crash,
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -294,6 +299,7 @@ impl Worker {
             FwCommand::SetTurbulence(rms) => self.sim.set_turbulence(rms),
             FwCommand::SetStorm(s) => self.sim.set_storm(s),
             FwCommand::SetFaults(f) => self.sim.set_faults(f),
+            FwCommand::Crash => self.sim.crash(),
             FwCommand::Pause(p) => self.paused = p,
             FwCommand::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             FwCommand::Reset(cfg) => {

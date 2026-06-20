@@ -49,6 +49,9 @@ const TERRAIN_SEED: u32 = 0x5EED_1234;
 /// home, ~640 k triangles — built once.
 const GLOBE_BANDS: usize = 400;
 
+/// Clearance \[m\] below which the aircraft is considered to have hit the terrain.
+const CRASH_MARGIN: f32 = 3.0;
+
 /// Mutable viewer state, edited by the controls window each frame.
 struct Ui {
     // Airframe selection.
@@ -588,6 +591,20 @@ fn main() {
         // --- update 3D transforms from the view (PCI render pose) ---
         let (pos, rot) = render_pose(&view);
         let pose = Mat4::from_translation(pos) * rot;
+
+        // Terrain collision: the sim has no terrain, so the viewer (which does)
+        // flags impact. If the aircraft is at or below the ground at its position,
+        // tell the engine to crash. `height_dir` returns the elevation above the
+        // datum, `view.altitude()` the aircraft's; cross them with a small margin.
+        if !source.is_replay() && !view.crashed {
+            let ground = terrain.height_dir(pos);
+            if (view.altitude() as f32) <= ground + CRASH_MARGIN {
+                match view.kind {
+                    AircraftKind::FixedWing => source.fw_command(FwCommand::Crash),
+                    AircraftKind::Quad => source.quad_command(Command::Crash),
+                }
+            }
+        }
         // Aircraft geographic pose (lat, lon, course) for the planisphere.
         let (map_lat, map_lon, map_course) = map_pose(&view);
         match view.kind {
@@ -1007,6 +1024,9 @@ fn controls_window(
 
             // --- state readout (airframe-agnostic) ---
             let (r, p, y) = view.local_attitude().euler_angles();
+            if view.crashed {
+                ui.colored_label(egui::Color32::from_rgb(235, 70, 60), "CRASHED — reset");
+            }
             ui.monospace(format!("t        {:7.2} s", view.t));
             ui.monospace(format!("altitude {:7.1} m", view.altitude()));
             match view.kind {
@@ -1121,6 +1141,15 @@ fn hud_overlay(ctx: &egui::Context, view: &ViewSnapshot, has_gamepad: bool) {
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
+                if view.crashed {
+                    ui.label(
+                        egui::RichText::new("CRASHED — press R")
+                            .color(egui::Color32::from_rgb(235, 70, 60))
+                            .strong()
+                            .size(26.0),
+                    );
+                    return;
+                }
                 let (txt, col) = if on {
                     ("FCS: ON", egui::Color32::from_rgb(60, 200, 90))
                 } else {

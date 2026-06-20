@@ -62,6 +62,8 @@ pub struct Sim {
     atmosphere: Atmosphere,
     /// Injected effector + sensor faults.
     faults: QuadFaults,
+    /// Crashed into the terrain — the aircraft is wreckage and stops flying.
+    crashed: bool,
     /// Last measurement per sensor (for a "stuck" sensor fault).
     last_imu: Option<ImuMeas>,
     last_gps: Option<GpsMeas>,
@@ -148,6 +150,7 @@ impl Sim {
             rk4: Rk4,
             atmosphere: Atmosphere::new(cfg.atmosphere),
             faults: QuadFaults::none(),
+            crashed: false,
             last_imu: None,
             last_gps: None,
             last_baro: None,
@@ -203,6 +206,18 @@ impl Sim {
     /// True if any fault is active (for the HUD).
     pub fn faulted(&self) -> bool {
         self.faults.any()
+    }
+
+    /// Crash the quad into the terrain: kill its velocity/rates and stop flying.
+    pub fn crash(&mut self) {
+        self.crashed = true;
+        self.truth.velocity = Vec3::zeros();
+        self.truth.angular_rate = Vec3::zeros();
+    }
+
+    /// True once the quad has crashed.
+    pub fn crashed(&self) -> bool {
+        self.crashed
     }
 
     /// Steady wind speed \[m/s\] (for the HUD).
@@ -312,6 +327,11 @@ impl Sim {
 
     /// Advance the whole simulator one base step (`dt`).
     pub fn step(&mut self) {
+        // Wreckage doesn't fly: a crashed quad is frozen where it hit.
+        if self.crashed {
+            self.tick += 1;
+            return;
+        }
         let t = self.time();
 
         // Wind (flat local NED is the quad's world) — advance the atmosphere once
@@ -872,5 +892,18 @@ mod tests {
             dropout > healthy + 2.0,
             "GPS dropout should drift the INS: healthy {healthy:.1} m vs dropout {dropout:.1} m"
         );
+    }
+
+    // A crash freezes the quad in place — wreckage doesn't fly.
+    #[test]
+    fn crash_freezes_the_quad() {
+        let mut sim = Sim::new(SimConfig::quad_250_mvp());
+        sim.run_headless(200);
+        sim.crash();
+        assert!(sim.crashed());
+        let pos = sim.truth().position;
+        sim.run_headless(2000);
+        assert_eq!(sim.truth().position, pos, "wreckage doesn't move");
+        assert_eq!(sim.truth().velocity, Vec3::zeros());
     }
 }

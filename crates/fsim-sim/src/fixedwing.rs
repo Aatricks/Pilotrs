@@ -190,6 +190,8 @@ pub struct FwSim {
     atmosphere: Atmosphere,
     /// Injected effector / powerplant faults.
     faults: FwFaults,
+    /// Crashed into the terrain — the aircraft is wreckage and stops flying.
+    crashed: bool,
     /// Last setpoint actually applied to the autopilot (logged each sample).
     setpoint: FixedWingSetpoint,
     /// Setpoint-hold / route-follow / manual (selects how `step` builds surfaces).
@@ -222,6 +224,7 @@ impl FwSim {
             fbw_cfg: cfg.fbw,
             atmosphere: Atmosphere::new(cfg.atmosphere),
             faults: FwFaults::none(),
+            crashed: false,
             setpoint: cfg.setpoint,
             mode,
             controls: FixedWingControls::zero(),
@@ -361,6 +364,20 @@ impl FwSim {
         self.faults.any()
     }
 
+    /// Crash the aircraft: it becomes wreckage — velocity and rates are killed
+    /// and `step` no longer flies it. The viewer calls this on terrain impact.
+    pub fn crash(&mut self) {
+        self.crashed = true;
+        self.truth.velocity = Vec3::zeros();
+        self.truth.angular_rate = Vec3::zeros();
+        self.controls = FixedWingControls::zero();
+    }
+
+    /// True once the aircraft has crashed.
+    pub fn crashed(&self) -> bool {
+        self.crashed
+    }
+
     /// Steady wind speed \[m/s\] (for the HUD).
     pub fn wind_speed(&self) -> Real {
         self.atmosphere.wind_speed()
@@ -422,6 +439,11 @@ impl FwSim {
 
     /// Advance one base step (control runs on its own slower gate).
     pub fn step(&mut self) {
+        // Wreckage doesn't fly: a crashed aircraft is frozen where it hit.
+        if self.crashed {
+            self.tick += 1;
+            return;
+        }
         if self.tick.is_multiple_of(self.control_period) {
             let control_dt = self.control_period as Real * self.dt;
             // Truth feedback, rotated into the local horizon (sphere).
@@ -1196,5 +1218,18 @@ mod tests {
             sim.airspeed()
         );
         assert!(sim.faulted(), "fault flag should be set");
+    }
+
+    // A crash turns the aircraft into wreckage: frozen in place, no longer flying.
+    #[test]
+    fn crash_freezes_the_aircraft() {
+        let mut sim = FwSim::new(FwSimConfig::fighter_manual(300.0));
+        sim.run_headless(200);
+        sim.crash();
+        assert!(sim.crashed());
+        let frozen = *sim.truth();
+        assert_eq!(frozen.velocity, Vec3::zeros());
+        sim.run_headless(2000);
+        assert_eq!(*sim.truth(), frozen, "wreckage doesn't move");
     }
 }
