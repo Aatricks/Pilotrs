@@ -9,6 +9,7 @@
 //! deterministic); `FixedSteps` runs an exact number of steps on the thread and
 //! is **bit-for-bit identical** to [`Sim::run_headless`].
 
+use crate::atmosphere::StormCell;
 use crate::config::{EstimatorKind, SimConfig};
 use crate::guidance::Waypoint;
 use crate::telemetry::{Telemetry, TelemetrySample};
@@ -39,6 +40,8 @@ pub struct Snapshot {
     pub wind_speed: Real,
     /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
     pub gust: Real,
+    /// Storm proximity (0 = clear air, 1 = microburst core).
+    pub storm: Real,
     pub paused: bool,
     pub recording: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
@@ -62,6 +65,7 @@ impl Snapshot {
             waypoint_index: sim.waypoint_index(),
             wind_speed: sim.wind_speed(),
             gust: sim.gust(),
+            storm: sim.storm_intensity(),
             paused,
             recording,
             seq,
@@ -90,6 +94,7 @@ impl Snapshot {
             waypoint_index: None,
             wind_speed: 0.0, // recordings predate the weather model
             gust: 0.0,
+            storm: 0.0,
             paused: false,
             recording: false,
             seq: 0,
@@ -128,6 +133,8 @@ pub enum Command {
     SetWind(Vec3),
     /// Set the turbulence intensity (RMS gust \[m/s\]; 0 = calm).
     SetTurbulence(Real),
+    /// Place (or clear) the storm / microburst cell.
+    SetStorm(Option<StormCell>),
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -327,6 +334,7 @@ impl Worker {
             }
             Command::SetWind(w) => self.sim.set_wind(w),
             Command::SetTurbulence(rms) => self.sim.set_turbulence(rms),
+            Command::SetStorm(s) => self.sim.set_storm(s),
             Command::Pause(p) => self.paused = p,
             Command::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             Command::Reset(cfg) => {

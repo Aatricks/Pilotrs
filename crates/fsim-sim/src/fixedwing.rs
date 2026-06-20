@@ -7,7 +7,7 @@
 //! The autopilot here flies on **truth** (perfect feedback); swapping in sensors
 //! and the INS is a one-line `est` change left for future work.
 
-use crate::atmosphere::{Atmosphere, AtmosphereConfig};
+use crate::atmosphere::{Atmosphere, AtmosphereConfig, StormCell};
 use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
 use crate::guidance::Waypoint;
 use fsim_control::{
@@ -342,6 +342,11 @@ impl FwSim {
         self.atmosphere.set_turbulence(rms);
     }
 
+    /// Place (or clear) the storm / microburst cell.
+    pub fn set_storm(&mut self, storm: Option<StormCell>) {
+        self.atmosphere.set_storm(storm);
+    }
+
     /// Steady wind speed \[m/s\] (for the HUD).
     pub fn wind_speed(&self) -> Real {
         self.atmosphere.wind_speed()
@@ -350,6 +355,11 @@ impl FwSim {
     /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
     pub fn gust(&self) -> Real {
         self.atmosphere.gust_magnitude()
+    }
+
+    /// How deep in the storm the aircraft is (0 = clear, 1 = core).
+    pub fn storm_intensity(&self) -> Real {
+        self.atmosphere.storm_intensity()
     }
 
     /// The active commanded setpoint (route-derived when following a route).
@@ -424,10 +434,13 @@ impl FwSim {
         // Wind in the world (PCI) frame: advance the atmosphere exactly once per
         // physics step (never inside RK4 — that would over-sample the turbulence)
         // and hold it constant across the sub-steps. The steady wind + gust are in
-        // local NED, so rotate them into PCI at the current position.
+        // local NED, so rotate them into PCI at the current position. The aircraft's
+        // map position (north, east metres from home) locates it within the storm.
+        let (lat, lon, _) = planet::pci_to_geodetic(self.truth.position);
+        let (pos_n, pos_e) = (lat * planet::PLANET_RADIUS, lon * planet::PLANET_RADIUS);
         let wind_ned = self
             .atmosphere
-            .wind_ned(self.truth.velocity.norm(), self.dt);
+            .wind_ned(pos_n, pos_e, self.truth.velocity.norm(), self.dt);
         let wind_world = planet::pci_from_ned(self.truth.position) * wind_ned;
 
         let p = &self.params;
@@ -1047,5 +1060,40 @@ mod tests {
         assert_eq!(a.velocity, b.velocity);
         assert_eq!(a.attitude, b.attitude);
         assert_eq!(a.angular_rate, b.angular_rate);
+    }
+
+    // The fighter spawns inside a microburst (downdraft + outflow + turbulence):
+    // the FBW keeps it controlled while it punches through, and as it flies clear
+    // (north, out of the cell) the storm reading falls back toward calm.
+    #[test]
+    fn fighter_rides_through_a_microburst() {
+        let mut cfg = FwSimConfig::fighter_manual(500.0);
+        cfg.atmosphere.storm = Some(StormCell::microburst((0.0, 0.0))); // at the spawn point
+        let trim_throttle = cfg.fbw.throttle_trim;
+        let mut sim = FwSim::new(cfg);
+        sim.set_stick(StickInput {
+            pitch: 0.0,
+            roll: 0.0,
+            yaw: 0.0,
+            throttle: trim_throttle,
+        });
+        sim.step();
+        let entered = sim.storm_intensity();
+        let mut worst = 0.0_f64;
+        for _ in 0..12_000 {
+            sim.step();
+            worst = worst.max(sim.truth().angular_rate.norm());
+        }
+        assert!(entered > 0.8, "should start in the storm core: {entered}");
+        assert!(
+            worst < 2.5,
+            "FBW should keep the fighter controlled through the microburst: {worst} rad/s"
+        );
+        assert!(
+            sim.storm_intensity() < 0.5,
+            "should fly clear of the cell: {}",
+            sim.storm_intensity()
+        );
+        assert!(sim.truth().position.iter().all(|x| x.is_finite()));
     }
 }

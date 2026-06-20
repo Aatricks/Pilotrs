@@ -22,7 +22,7 @@ mod recording;
 mod scheduler;
 mod telemetry;
 
-pub use atmosphere::{Atmosphere, AtmosphereConfig};
+pub use atmosphere::{Atmosphere, AtmosphereConfig, StormCell};
 pub use batch::{
     aggregate, run_batch, run_batch_seq, run_one, seed_sweep, square_mission, summarize_default,
     McSummary, RunMetrics, RunSpec, RunTask,

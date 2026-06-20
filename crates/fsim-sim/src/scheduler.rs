@@ -1,7 +1,7 @@
 //! The fixed-step scheduler: one struct that owns every subsystem and advances
 //! them deterministically.
 
-use crate::atmosphere::Atmosphere;
+use crate::atmosphere::{Atmosphere, StormCell};
 use crate::config::{ControllerKind, EstimatorKind, SimConfig};
 use crate::guidance::{Guidance, GuidanceConfig, Waypoint};
 use crate::telemetry::{Telemetry, TelemetrySample};
@@ -175,6 +175,11 @@ impl Sim {
         self.atmosphere.set_turbulence(rms);
     }
 
+    /// Place (or clear) the storm / microburst cell.
+    pub fn set_storm(&mut self, storm: Option<StormCell>) {
+        self.atmosphere.set_storm(storm);
+    }
+
     /// Steady wind speed \[m/s\] (for the HUD).
     pub fn wind_speed(&self) -> Real {
         self.atmosphere.wind_speed()
@@ -183,6 +188,11 @@ impl Sim {
     /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
     pub fn gust(&self) -> Real {
         self.atmosphere.gust_magnitude()
+    }
+
+    /// How deep in the storm the quad is (0 = clear, 1 = core).
+    pub fn storm_intensity(&self) -> Real {
+        self.atmosphere.storm_intensity()
     }
 
     /// Set the active attitude/thrust setpoint (the viewer calls this live).
@@ -281,10 +291,14 @@ impl Sim {
 
         // Wind (flat local NED is the quad's world) — advance the atmosphere once
         // per step and use the same value for the accelerometer's specific force
-        // and the integration, so drag is air-relative and the IMU sees it.
-        let wind = self
-            .atmosphere
-            .wind_ned(self.truth.velocity.norm(), self.dt);
+        // and the integration, so drag is air-relative and the IMU sees it. The
+        // quad's NED position is already (north, east) metres from home.
+        let wind = self.atmosphere.wind_ned(
+            self.truth.position.x,
+            self.truth.position.y,
+            self.truth.velocity.norm(),
+            self.dt,
+        );
 
         // 1. True acceleration acting right now, from the motor thrust that was
         //    in effect over the just-completed interval. The accelerometer

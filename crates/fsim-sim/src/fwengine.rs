@@ -10,6 +10,7 @@
 //! clock, so individual steps stay deterministic); `FixedSteps` runs an exact
 //! number of steps and is **bit-for-bit identical** to [`FwSim::run_headless`].
 
+use crate::atmosphere::StormCell;
 use crate::engine::EngineClosed;
 use crate::fixedwing::{FwSample, FwSim, FwSimConfig};
 use crate::fw_guidance::FwGuidanceConfig;
@@ -47,6 +48,8 @@ pub struct FwSnapshot {
     pub wind_speed: Real,
     /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
     pub gust: Real,
+    /// Storm proximity (0 = clear air, 1 = microburst core).
+    pub storm: Real,
     pub paused: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
     /// from `tick`, which only advances when the physics steps).
@@ -71,6 +74,7 @@ impl FwSnapshot {
             fbw_on: sim.fbw_on(),
             wind_speed: sim.wind_speed(),
             gust: sim.gust(),
+            storm: sim.storm_intensity(),
             paused,
             seq,
         }
@@ -119,6 +123,8 @@ pub enum FwCommand {
     SetWind(Vec3),
     /// Set the turbulence intensity (RMS gust \[m/s\]; 0 = calm).
     SetTurbulence(Real),
+    /// Place (or clear) the storm / microburst cell.
+    SetStorm(Option<StormCell>),
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -280,6 +286,7 @@ impl Worker {
             FwCommand::SetFbw(on) => self.sim.set_fbw(on),
             FwCommand::SetWind(w) => self.sim.set_wind(w),
             FwCommand::SetTurbulence(rms) => self.sim.set_turbulence(rms),
+            FwCommand::SetStorm(s) => self.sim.set_storm(s),
             FwCommand::Pause(p) => self.paused = p,
             FwCommand::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             FwCommand::Reset(cfg) => {

@@ -21,6 +21,44 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
+/// A storm / microburst cell — a localized hazard centred on a point in the
+/// local map frame `(north, east)` \[m\] from home, optionally drifting.
+///
+/// Near the centre it stacks three effects, each falling off as a Gaussian in
+/// the horizontal distance `r` from the core: a **downdraft** (sinking air), a
+/// radial **outflow** (the diverging surface wind a microburst is infamous for,
+/// peaking near the cell radius), and a **turbulence boost** (the air gets rough
+/// inside the cell). Fly through one and the FBW fighter earns its keep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StormCell {
+    /// Cell centre at `t = 0`: `(north, east)` \[m\] from home.
+    pub center: (Real, Real),
+    /// Drift velocity of the centre `(north, east)` \[m/s\].
+    pub velocity: (Real, Real),
+    /// Horizontal scale (Gaussian 1/e radius) \[m\].
+    pub radius: Real,
+    /// Peak downdraft speed at the core \[m/s\] (NED `+z` = down).
+    pub downdraft: Real,
+    /// Peak radial outflow speed \[m/s\].
+    pub outflow: Real,
+    /// Extra turbulence RMS \[m/s\] added at the core.
+    pub turbulence_boost: Real,
+}
+
+impl StormCell {
+    /// A punchy microburst at map point `(north, east)` \[m\], stationary.
+    pub fn microburst(center: (Real, Real)) -> Self {
+        Self {
+            center,
+            velocity: (0.0, 0.0),
+            radius: 400.0,
+            downdraft: 10.0,
+            outflow: 8.0,
+            turbulence_boost: 4.0,
+        }
+    }
+}
+
 /// Steady wind, turbulence intensity, and the turbulence length scales.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtmosphereConfig {
@@ -35,6 +73,8 @@ pub struct AtmosphereConfig {
     pub scale_lengths: Vec3,
     /// Airspeed floor for the gust time constant (avoids divide-by-zero at rest).
     pub va_min: Real,
+    /// An optional storm / microburst cell layered on top of the steady field.
+    pub storm: Option<StormCell>,
     /// RNG seed for the turbulence stream (independent of the sensor streams).
     pub seed: u64,
 }
@@ -48,6 +88,7 @@ impl AtmosphereConfig {
             turbulence: 0.0,
             scale_lengths: Vec3::new(200.0, 200.0, 50.0),
             va_min: 1.0,
+            storm: None,
             seed: 0xA1_4036_0000_0001,
         }
     }
@@ -69,6 +110,10 @@ pub struct Atmosphere {
     rng: ChaCha8Rng,
     /// Current gust velocity \[m/s, NED\] (the Gauss–Markov state).
     gust: Vec3,
+    /// Elapsed sim time \[s\] (drives a moving storm cell).
+    time: Real,
+    /// Storm proximity at the last sample (Gaussian factor 0..1; 0 = no storm).
+    last_g: Real,
 }
 
 impl Atmosphere {
@@ -76,6 +121,8 @@ impl Atmosphere {
         Self {
             rng: ChaCha8Rng::seed_from_u64(cfg.seed),
             gust: Vec3::zeros(),
+            time: 0.0,
+            last_g: 0.0,
             cfg,
         }
     }
@@ -98,24 +145,73 @@ impl Atmosphere {
         }
     }
 
-    /// The current total wind \[m/s, NED\] at airspeed `va`: the steady wind plus
-    /// one advanced step of the Gauss–Markov gust. Call **once per physics step**
+    /// Place (or clear) the storm cell.
+    pub fn set_storm(&mut self, storm: Option<StormCell>) {
+        self.cfg.storm = storm;
+    }
+
+    /// The current total wind \[m/s, NED\] for an aircraft at map position
+    /// `(pos_n, pos_e)` \[m from home\], airspeed `va`: steady wind + storm cell
+    /// (downdraft + outflow) + one advanced step of the Gauss–Markov gust (whose
+    /// intensity is boosted inside the storm). Call **once per physics step**
     /// (hold it constant across the RK4 sub-steps).
-    pub fn wind_ned(&mut self, va: Real, dt: Real) -> Vec3 {
-        if self.cfg.turbulence > 0.0 {
+    pub fn wind_ned(&mut self, pos_n: Real, pos_e: Real, va: Real, dt: Real) -> Vec3 {
+        self.time += dt;
+        let mut wind = self.cfg.wind_ned;
+        let mut turb = self.cfg.turbulence;
+        self.last_g = 0.0;
+
+        if let Some(s) = self.cfg.storm {
+            // Cell centre at this time (it may drift); Gaussian falloff in r.
+            let cn = s.center.0 + s.velocity.0 * self.time;
+            let ce = s.center.1 + s.velocity.1 * self.time;
+            let (dn, de) = (pos_n - cn, pos_e - ce);
+            let r2 = dn * dn + de * de;
+            let rad = Float::max(s.radius, 1.0);
+            let g = Float::exp(-r2 / (rad * rad));
+            self.last_g = g;
+            // Downdraft (NED +z = down) sinks the air at the core.
+            wind.z += s.downdraft * g;
+            // Radial outflow: diverging horizontal wind, peaking near the radius.
+            let r = Float::sqrt(r2);
+            if r > 1e-3 {
+                let out = s.outflow * (r / rad) * g;
+                wind.x += out * dn / r;
+                wind.y += out * de / r;
+            }
+            turb += s.turbulence_boost * g;
+        }
+
+        if turb > 0.0 {
             let va_s = Float::max(va, self.cfg.va_min);
-            let sigma = self.cfg.turbulence;
             for i in 0..3 {
                 // Gauss–Markov: g ← a·g + σ·√(1−a²)·N(0,1), a = exp(−dt·V/L).
                 // Stationary variance is σ², correlation time L/V — a first-order
-                // Dryden gust.
+                // Dryden gust. `turb` is boosted inside the storm.
                 let l = Float::max(self.cfg.scale_lengths[i], 1.0);
                 let a = Float::exp(-dt * va_s / l);
                 let n: Real = StandardNormal.sample(&mut self.rng);
-                self.gust[i] = a * self.gust[i] + sigma * Float::sqrt(1.0 - a * a) * n;
+                self.gust[i] = a * self.gust[i] + turb * Float::sqrt(1.0 - a * a) * n;
             }
         }
-        self.cfg.wind_ned + self.gust
+        wind + self.gust
+    }
+
+    /// How deep in the storm the aircraft was at the last sample (0 = clear air,
+    /// 1 = dead centre) — for a HUD warning.
+    pub fn storm_intensity(&self) -> Real {
+        self.last_g
+    }
+
+    /// The storm cell's current centre `(north, east)` \[m\], if active (for the
+    /// HUD / map marker).
+    pub fn storm_center(&self) -> Option<(Real, Real)> {
+        self.cfg.storm.map(|s| {
+            (
+                s.center.0 + s.velocity.0 * self.time,
+                s.center.1 + s.velocity.1 * self.time,
+            )
+        })
     }
 
     /// The steady wind speed \[m/s\] (for a HUD readout).
@@ -139,7 +235,7 @@ mod tests {
     fn calm_is_still() {
         let mut atm = Atmosphere::new(AtmosphereConfig::calm());
         for _ in 0..1000 {
-            assert_eq!(atm.wind_ned(25.0, 1e-3), Vec3::zeros());
+            assert_eq!(atm.wind_ned(0.0, 0.0, 25.0, 1e-3), Vec3::zeros());
         }
         assert_eq!(atm.gust_magnitude(), 0.0);
     }
@@ -153,12 +249,12 @@ mod tests {
         let (va, dt) = (25.0, 1e-2);
         // Burn in past the correlation time, then accumulate variance.
         for _ in 0..2000 {
-            atm.wind_ned(va, dt);
+            atm.wind_ned(0.0, 0.0, va, dt);
         }
         let mut sum_sq = [0.0_f64; 3];
         let n = 200_000;
         for _ in 0..n {
-            let g = atm.wind_ned(va, dt);
+            let g = atm.wind_ned(0.0, 0.0, va, dt);
             for i in 0..3 {
                 sum_sq[i] += g[i] * g[i];
             }
@@ -179,12 +275,12 @@ mod tests {
         let mut atm = Atmosphere::new(AtmosphereConfig::wind(Vec3::zeros(), 3.0));
         let (va, dt) = (25.0, 1e-2);
         for _ in 0..2000 {
-            atm.wind_ned(va, dt);
+            atm.wind_ned(0.0, 0.0, va, dt);
         }
-        let mut prev = atm.wind_ned(va, dt).x;
+        let mut prev = atm.wind_ned(0.0, 0.0, va, dt).x;
         let (mut num, mut den) = (0.0_f64, 0.0_f64);
         for _ in 0..50_000 {
-            let cur = atm.wind_ned(va, dt).x;
+            let cur = atm.wind_ned(0.0, 0.0, va, dt).x;
             num += prev * cur;
             den += prev * prev;
             prev = cur;
@@ -204,7 +300,7 @@ mod tests {
             let mut atm = Atmosphere::new(AtmosphereConfig::wind(Vec3::new(-5.0, 2.0, 0.0), 4.0));
             let mut last = Vec3::zeros();
             for _ in 0..5000 {
-                last = atm.wind_ned(30.0, 1e-3);
+                last = atm.wind_ned(0.0, 0.0, 30.0, 1e-3);
             }
             last
         };
@@ -216,11 +312,86 @@ mod tests {
     fn set_turbulence_zero_clears_gust() {
         let mut atm = Atmosphere::new(AtmosphereConfig::wind(Vec3::zeros(), 5.0));
         for _ in 0..500 {
-            atm.wind_ned(25.0, 1e-2);
+            atm.wind_ned(0.0, 0.0, 25.0, 1e-2);
         }
         assert!(atm.gust_magnitude() > 0.0);
         atm.set_turbulence(0.0);
         assert_eq!(atm.gust_magnitude(), 0.0);
-        assert_eq!(atm.wind_ned(25.0, 1e-2), Vec3::zeros());
+        assert_eq!(atm.wind_ned(0.0, 0.0, 25.0, 1e-2), Vec3::zeros());
+    }
+
+    // --- Storm cell ---
+
+    fn storm_atm(center: (Real, Real)) -> Atmosphere {
+        Atmosphere::new(AtmosphereConfig {
+            storm: Some(StormCell::microburst(center)),
+            ..AtmosphereConfig::calm()
+        })
+    }
+
+    // At the core the air sinks hard (downdraft, NED +z) and the storm reads full
+    // intensity; far outside the cell it's calm.
+    #[test]
+    fn storm_sinks_air_at_the_core() {
+        let mut atm = storm_atm((0.0, 0.0));
+        let w = atm.wind_ned(0.0, 0.0, 25.0, 1e-2);
+        assert!(w.z > 5.0, "downdraft at the core: {}", w.z);
+        assert!(
+            atm.storm_intensity() > 0.9,
+            "core intensity: {}",
+            atm.storm_intensity()
+        );
+
+        let mut far = storm_atm((0.0, 0.0));
+        let wf = far.wind_ned(3000.0, 0.0, 25.0, 1e-2);
+        assert!(wf.norm() < 0.1, "far from the storm is calm: {wf:?}");
+        assert!(far.storm_intensity() < 0.01);
+    }
+
+    // Off-centre, the horizontal wind blows radially outward (a microburst's
+    // diverging outflow) — north of the core it pushes further north.
+    #[test]
+    fn storm_outflow_is_radial() {
+        let mut atm = storm_atm((0.0, 0.0));
+        let w = atm.wind_ned(200.0, 0.0, 25.0, 1e-2); // 200 m north, inside r=400
+        assert!(
+            w.x > 1.0,
+            "outflow should blow radially out (north): {}",
+            w.x
+        );
+        assert!(w.z > 0.0, "still sinking off-centre: {}", w.z);
+    }
+
+    // The storm roughens the air even with no base turbulence.
+    #[test]
+    fn storm_roughens_the_air() {
+        let mut atm = storm_atm((0.0, 0.0));
+        for _ in 0..500 {
+            atm.wind_ned(0.0, 0.0, 25.0, 1e-2);
+        }
+        assert!(
+            atm.gust_magnitude() > 0.5,
+            "storm should add turbulence: {}",
+            atm.gust_magnitude()
+        );
+    }
+
+    // A storm (with base turbulence too) is reproducible bit-for-bit.
+    #[test]
+    fn storm_is_deterministic() {
+        let cfg = AtmosphereConfig {
+            storm: Some(StormCell::microburst((100.0, 50.0))),
+            turbulence: 1.0,
+            ..AtmosphereConfig::calm()
+        };
+        let run = || {
+            let mut atm = Atmosphere::new(cfg);
+            let mut w = Vec3::zeros();
+            for k in 0..3000 {
+                w = atm.wind_ned(k as Real * 0.01, 0.0, 30.0, 1e-2);
+            }
+            w
+        };
+        assert_eq!(run(), run());
     }
 }

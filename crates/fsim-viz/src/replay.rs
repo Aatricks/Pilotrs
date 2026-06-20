@@ -50,6 +50,8 @@ pub struct ViewSnapshot {
     pub wind_speed: Real,
     /// Instantaneous turbulence gust magnitude \[m/s\] (fixed-wing; 0 for quad).
     pub gust: Real,
+    /// Storm proximity (0 = clear air, 1 = microburst core).
+    pub storm: Real,
 }
 
 impl ViewSnapshot {
@@ -69,6 +71,7 @@ impl ViewSnapshot {
             load_factor: 0.0,
             wind_speed: s.wind_speed,
             gust: s.gust,
+            storm: s.storm,
         }
     }
 
@@ -88,6 +91,7 @@ impl ViewSnapshot {
             load_factor: s.load_factor,
             wind_speed: s.wind_speed,
             gust: s.gust,
+            storm: s.storm,
         }
     }
 

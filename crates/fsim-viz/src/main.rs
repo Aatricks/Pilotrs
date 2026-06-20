@@ -86,6 +86,8 @@ struct Ui {
     do_save: bool,
     do_replay: bool,
     do_live: bool,
+    drop_storm: bool,
+    clear_storm: bool,
     replay_toggle_play: bool,
     replay_seek: Option<f64>,
 }
@@ -480,6 +482,8 @@ fn main() {
         do_save: false,
         do_replay: false,
         do_live: false,
+        drop_storm: false,
+        clear_storm: false,
         replay_toggle_play: false,
         replay_seek: None,
     };
@@ -625,6 +629,8 @@ fn main() {
         ui.do_replay = false;
         ui.do_live = false;
         ui.do_airframe_switch = false;
+        ui.drop_storm = false;
+        ui.clear_storm = false;
         ui.replay_toggle_play = false;
         ui.replay_seek = None;
         // Fighter reset-to-trim (R key / gamepad Start) re-spawns at trim. Set it
@@ -728,6 +734,25 @@ fn main() {
             }
             if let Some(t) = ui.replay_seek {
                 r.seek(t);
+            }
+        }
+
+        // --- storm dispatch: drop a microburst at the aircraft's map position ---
+        if ui.drop_storm {
+            let r = planet::PLANET_RADIUS;
+            let storm = Some(fsim_sim::StormCell::microburst((
+                map_lat as f64 * r,
+                map_lon as f64 * r,
+            )));
+            match source.kind() {
+                AircraftKind::FixedWing => source.fw_command(FwCommand::SetStorm(storm)),
+                AircraftKind::Quad => source.quad_command(Command::SetStorm(storm)),
+            }
+        }
+        if ui.clear_storm {
+            match source.kind() {
+                AircraftKind::FixedWing => source.fw_command(FwCommand::SetStorm(None)),
+                AircraftKind::Quad => source.quad_command(Command::SetStorm(None)),
             }
         }
 
@@ -894,6 +919,14 @@ fn controls_window(
                 ui.label("weather");
                 ui.add(egui::Slider::new(&mut st.wind_speed, 0.0..=15.0).text("wind (m/s)"));
                 ui.add(egui::Slider::new(&mut st.turbulence, 0.0..=8.0).text("turbulence (m/s)"));
+                ui.horizontal(|ui| {
+                    if ui.button("drop microburst").clicked() {
+                        st.drop_storm = true;
+                    }
+                    if ui.button("clear storm").clicked() {
+                        st.clear_storm = true;
+                    }
+                });
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut st.paused, "pause");
@@ -1011,6 +1044,13 @@ fn hud_overlay(ctx: &egui::Context, view: &ViewSnapshot, has_gamepad: bool) {
                     ui.label(
                         egui::RichText::new("⚠ DIVERGING — press F")
                             .color(egui::Color32::from_rgb(235, 70, 60))
+                            .strong(),
+                    );
+                }
+                if view.storm > 0.15 {
+                    ui.label(
+                        egui::RichText::new("⛈ STORM")
+                            .color(egui::Color32::from_rgb(255, 200, 40))
                             .strong(),
                     );
                 }
