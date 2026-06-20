@@ -300,6 +300,27 @@ fn opaque(context: &Context, r: u8, g: u8, b: u8) -> PhysicalMaterial {
     )
 }
 
+/// An opaque physically-based material with explicit roughness/metallic — for
+/// the satin-metal aircraft skin and the glossy glass canopy.
+fn mat_pbr(
+    context: &Context,
+    r: u8,
+    g: u8,
+    b: u8,
+    roughness: f32,
+    metallic: f32,
+) -> PhysicalMaterial {
+    PhysicalMaterial::new_opaque(
+        context,
+        &CpuMaterial {
+            albedo: Srgba { r, g, b, a: 255 },
+            roughness,
+            metallic,
+            ..Default::default()
+        },
+    )
+}
+
 /// Adapter so the minimap can sample the real [`Terrain`] without depending on
 /// its concrete type. The minimap is a *local tangent map* at home, so a North/
 /// East offset maps to a direction on the globe ([`ne_to_dir`]) and we sample the
@@ -318,55 +339,111 @@ impl TerrainLike for Terrain {
     }
 }
 
-/// A simple low-poly fixed-wing body (fuselage + wing + tail) in FRD body axes
-/// (nose +x, right wing +y, down +z). Returns the parts and their fixed local
-/// base transforms; each frame the live pose is applied as `pose * base`.
+/// A low-poly but jet-like fixed-wing model in FRD body axes (nose +x, right
+/// wing +y, down +z): a rounded fuselage + tapered nose cone, a dark glass
+/// canopy, swept wings and stabilisers, and a swept fin. Returns the parts and
+/// their fixed local base transforms; each frame the live pose is `pose * base`.
 fn build_fw_body(context: &Context) -> (Vec<Gm<Mesh, PhysicalMaterial>>, Vec<Mat4>) {
     let mut parts = Vec::new();
     let mut bases = Vec::new();
-    let add = |parts: &mut Vec<Gm<Mesh, PhysicalMaterial>>,
-               bases: &mut Vec<Mat4>,
-               mat: PhysicalMaterial,
-               base: Mat4| {
-        parts.push(Gm::new(Mesh::new(context, &CpuMesh::cube()), mat));
+    let mut add = |mesh: CpuMesh, mat: PhysicalMaterial, base: Mat4| {
+        parts.push(Gm::new(Mesh::new(context, &mesh), mat));
         bases.push(base);
     };
-    // Fuselage: long along +x (≈16 m).
+    // Satin-metal airframe grey; swept surfaces.
+    let skin = |r, g, b| mat_pbr(context, r, g, b, 0.45, 0.3);
+    let sweep = degrees(17.0);
+    let fin_sweep = degrees(30.0);
+
+    // Fuselage: a rounded body along +x (≈13 m).
     add(
-        &mut parts,
-        &mut bases,
-        opaque(context, 205, 205, 215),
-        Mat4::from_nonuniform_scale(8.0, 1.0, 1.0),
+        CpuMesh::cylinder(20),
+        skin(150, 156, 168),
+        Mat4::from_translation(vec3(-6.5, 0.0, 0.0)) * Mat4::from_nonuniform_scale(13.0, 0.8, 0.92),
     );
-    // Main wing: wide along ±y (≈18 m span), thin in z, slightly aft of nose.
+    // Tapered nose cone off the front.
     add(
-        &mut parts,
-        &mut bases,
-        opaque(context, 70, 130, 215),
-        Mat4::from_translation(vec3(-1.0, 0.0, 0.0)) * Mat4::from_nonuniform_scale(1.6, 9.0, 0.25),
+        CpuMesh::cone(20),
+        skin(150, 156, 168),
+        Mat4::from_translation(vec3(6.5, 0.0, 0.0)) * Mat4::from_nonuniform_scale(3.3, 0.8, 0.92),
     );
-    // Horizontal tail at the rear (-x).
+    // Dark exhaust nozzle at the tail.
     add(
-        &mut parts,
-        &mut bases,
-        opaque(context, 70, 130, 215),
-        Mat4::from_translation(vec3(-7.0, 0.0, 0.0)) * Mat4::from_nonuniform_scale(1.0, 3.5, 0.2),
+        CpuMesh::cylinder(16),
+        mat_pbr(context, 58, 60, 68, 0.5, 0.4),
+        Mat4::from_translation(vec3(-7.6, 0.0, 0.0)) * Mat4::from_nonuniform_scale(1.2, 0.62, 0.72),
     );
-    // Vertical fin: "up" is body -z, so it extends toward -z.
+    // Canopy: a dark glass bubble on top-front (up is body -z).
     add(
-        &mut parts,
-        &mut bases,
-        opaque(context, 240, 140, 40),
-        Mat4::from_translation(vec3(-7.0, 0.0, -1.6)) * Mat4::from_nonuniform_scale(1.0, 0.25, 1.8),
+        CpuMesh::sphere(16),
+        mat_pbr(context, 46, 58, 80, 0.15, 0.2),
+        Mat4::from_translation(vec3(2.0, 0.0, -0.62))
+            * Mat4::from_nonuniform_scale(2.4, 0.74, 0.64),
+    );
+    // Swept main wings (right, then left), thin in z, mid-mounted. Each is built
+    // root-at-origin, swept about z, then attached to the fuselage.
+    add(
+        CpuMesh::cube(),
+        skin(126, 132, 144),
+        Mat4::from_translation(vec3(-0.5, 0.7, 0.12))
+            * Mat4::from_angle_z(sweep)
+            * Mat4::from_translation(vec3(0.0, 3.0, 0.0))
+            * Mat4::from_nonuniform_scale(2.6, 6.0, 0.16),
+    );
+    add(
+        CpuMesh::cube(),
+        skin(126, 132, 144),
+        Mat4::from_translation(vec3(-0.5, -0.7, 0.12))
+            * Mat4::from_angle_z(-sweep)
+            * Mat4::from_translation(vec3(0.0, -3.0, 0.0))
+            * Mat4::from_nonuniform_scale(2.6, 6.0, 0.16),
+    );
+    // Swept horizontal stabilisers at the tail.
+    add(
+        CpuMesh::cube(),
+        skin(126, 132, 144),
+        Mat4::from_translation(vec3(-5.6, 0.5, 0.0))
+            * Mat4::from_angle_z(sweep)
+            * Mat4::from_translation(vec3(0.0, 1.5, 0.0))
+            * Mat4::from_nonuniform_scale(1.7, 3.0, 0.14),
+    );
+    add(
+        CpuMesh::cube(),
+        skin(126, 132, 144),
+        Mat4::from_translation(vec3(-5.6, -0.5, 0.0))
+            * Mat4::from_angle_z(-sweep)
+            * Mat4::from_translation(vec3(0.0, -1.5, 0.0))
+            * Mat4::from_nonuniform_scale(1.7, 3.0, 0.14),
+    );
+    // Swept vertical fin (up is body -z), in a steel-blue accent.
+    add(
+        CpuMesh::cube(),
+        skin(96, 116, 150),
+        Mat4::from_translation(vec3(-5.9, 0.0, -0.35))
+            * Mat4::from_angle_y(fin_sweep)
+            * Mat4::from_translation(vec3(0.0, 0.0, -1.4))
+            * Mat4::from_nonuniform_scale(2.4, 0.18, 2.8),
     );
     (parts, bases)
 }
 
-/// A scattered field of translucent cumulus puffs over the home region, at a
-/// couple of altitude decks. Each puff is a squashed sphere laid flat to the
-/// local horizon (`pci_from_ned`). Built once; a first cut to iterate on.
+/// A scattered field of fluffy cumulus over the home region at a couple of
+/// altitude decks. Each cloud is a *cluster* of overlapping spheres (a lumpy
+/// billow, not a flat disc), laid flat to the local horizon via `pci_from_ned`.
+/// Opaque white with an emissive lift so the undersides stay bright rather than
+/// going muddy grey under the sun. Built once; tuned from screenshots.
 fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
     let r = planet::PLANET_RADIUS;
+    // Lobe offsets (local NED, in puff-radius units) + relative size — overlapping
+    // blobs that read as one billowing cloud rather than a single ball.
+    let lobes = [
+        (0.0, 0.0, 0.0, 1.0),
+        (0.9, 0.3, 0.10, 0.72),
+        (-0.8, 0.4, 0.05, 0.66),
+        (0.3, -0.9, 0.12, 0.62),
+        (-0.4, -0.7, 0.0, 0.58),
+        (0.6, 0.9, 0.15, 0.50),
+    ];
     let mut xforms = Vec::new();
     for i in -5i32..=5 {
         for j in -5i32..=5 {
@@ -375,16 +452,22 @@ fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
             if h < 5.0 {
                 continue; // leave clear sky between the clumps
             }
-            let n = i as f64 * 600.0 + (h - 8.0) * 50.0;
-            let e = j as f64 * 600.0 + (h - 8.0) * 30.0;
-            let alt = 750.0 + h * 45.0; // ~750–1450 m, a couple of decks
+            let n = i as f64 * 650.0 + (h - 8.0) * 50.0;
+            let e = j as f64 * 650.0 + (h - 8.0) * 30.0;
+            let alt = 800.0 + h * 45.0; // ~800–1500 m, a couple of decks
             let p = planet::geodetic_to_pci(n / r, e / r, alt);
-            let s = (100.0 + h * 14.0) as f32;
-            xforms.push(
-                Mat4::from_translation(to_v(&p))
-                    * to_rot(&planet::pci_from_ned(p))
-                    * Mat4::from_nonuniform_scale(s, s, s * 0.4),
-            );
+            let q = planet::pci_from_ned(p);
+            let rot = to_rot(&q);
+            let base = 65.0 + h * 9.0; // puff radius [m]
+            for (dx, dy, dz, sc) in lobes {
+                let off = q * fsim_sim::Vec3::new(dx * base, dy * base, dz * base);
+                let s = (base * sc) as f32;
+                xforms.push(
+                    Mat4::from_translation(to_v(&(p + off)))
+                        * rot
+                        * Mat4::from_nonuniform_scale(s, s, s * 0.78),
+                );
+            }
         }
     }
     Gm::new(
@@ -396,15 +479,21 @@ fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
             },
             &CpuMesh::sphere(12),
         ),
-        // Alpha < 255 ⇒ three-d treats it as transparent and blends it.
-        PhysicalMaterial::new(
+        PhysicalMaterial::new_opaque(
             context,
             &CpuMaterial {
                 albedo: Srgba {
-                    r: 244,
-                    g: 246,
-                    b: 250,
-                    a: 160,
+                    r: 250,
+                    g: 252,
+                    b: 255,
+                    a: 255,
+                },
+                // Lifts the shadowed undersides toward white (cumulus, not slate).
+                emissive: Srgba {
+                    r: 72,
+                    g: 74,
+                    b: 82,
+                    a: 255,
                 },
                 roughness: 1.0,
                 metallic: 0.0,
@@ -918,7 +1007,6 @@ fn main() {
                 }
             }
         }
-        // Clouds are translucent, so draw them last (after the opaque scene).
         objects.push(&clouds);
         frame_input
             .screen()
