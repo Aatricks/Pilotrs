@@ -1,14 +1,23 @@
 # Pilotrs
 
-A from-scratch **6-degrees-of-freedom flight simulator and autopilot**, written
-in Rust. It simulates the full rigid-body dynamics of two aircraft — a
-**quadrotor** and a **fixed-wing UAV** — and wraps each in a complete
-**sensing → estimation → control** stack.
+[![CI](https://github.com/Aatricks/Pilotrs/actions/workflows/ci.yml/badge.svg)](https://github.com/Aatricks/Pilotrs/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/Rust-1.91%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
+[![Core](https://img.shields.io/badge/core-no__std-success.svg)](#workspace-layout)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
+A from-scratch **6-degrees-of-freedom flight simulator and autopilot**, written in
+Rust. It runs the full rigid-body dynamics of a **quadrotor** and a **fixed-wing**
+— each wrapped in a complete **sensing → estimation → control** stack — over a
+spherical, 1/1000-scale Earth.
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Pilotrs — hand-flying the fly-by-wire fighter over the 1/1000-scale Earth" width="640">
+</p>
+<p align="center"><em>Hand-flying the relaxed-stability fighter over the globe — flip the flight-control system off (<code>F</code>) and the unstable airframe departs in under a second.</em></p>
 
 The defining constraint: **the autopilot never sees ground truth.** It flies on
-noisy, degraded sensor measurements fused by an onboard estimator — which is
-what makes this a real estimation-and-control problem rather than a kinematics
-demo.
+noisy, degraded sensor measurements fused by an onboard estimator — which is what
+makes this a real estimation-and-control problem rather than a kinematics demo.
 
 Built on [`nalgebra`](https://nalgebra.org), kept **`no_std`-clean** in the
 flight-control core (so it can target embedded / Ferrocene toolchains), and
@@ -22,27 +31,26 @@ truth ─▶ SENSORS ─────▶ ESTIMATOR ───────▶ CONTR
                           15-state INS)        waypoints)
 ```
 
-The controller and estimator consume **only** the estimator's output, never
-truth, so the estimate-vs-truth plots in the viewer actually mean something.
+The controller and estimator consume **only** the estimator's output, never truth,
+so the estimate-vs-truth plots in the viewer actually mean something.
 
 ## Features
 
 **Dynamics & integration**
 - 6DOF rigid-body equations of motion with the full non-diagonal inertia tensor,
   shared verbatim by both airframes.
-- Fixed-step **RK4** integrator at 1 kHz with per-step quaternion
-  renormalization.
-- A quadrotor plant (thrust + drag) and a Beard & McLain **fixed-wing
-  aerodynamic model** (lift/drag/moment coefficients, stall blend, control
-  surfaces, propeller) with a Newton **trim** solver.
+- Fixed-step **RK4** integrator at 1 kHz with per-step quaternion renormalization.
+- A quadrotor plant (thrust + drag) and a Beard & McLain **fixed-wing aerodynamic
+  model** (lift/drag/moment coefficients, stall blend, control surfaces,
+  propeller) with a Newton **trim** solver.
 
 **Sensing & estimation**
 - Sensor models — IMU, GPS, barometer, magnetometer — each degrading truth with
   seeded, reproducible noise and bias random-walk.
-- Three selectable estimators: a **complementary filter**, a 6-state
-  **quaternion MEKF** (attitude + gyro bias), and a 15-state **INS**
-  (GPS/baro/velocity/mag fusion) that treats the accelerometer as a strapdown
-  input, so sustained acceleration no longer corrupts attitude.
+- Three selectable estimators: a **complementary filter**, a 6-state **quaternion
+  MEKF** (attitude + gyro bias), and a 15-state **INS** (GPS/baro/velocity/mag
+  fusion) that treats the accelerometer as a strapdown input, so sustained
+  acceleration no longer corrupts attitude.
 
 **Control & guidance**
 - A cascaded **PID** and an **LQR** inner loop, swappable per run behind a common
@@ -51,17 +59,31 @@ truth, so the estimate-vs-truth plots in the viewer actually mean something.
 - A successive-loop **fixed-wing autopilot** holding airspeed, altitude, and
   course, with coordinated turns.
 
+**Fly-by-wire fighter — you have the stick**
+- Take the controls yourself, **keyboard or gamepad**, and hand-fly a
+  **relaxed-stability fighter**: an airframe with a *negative static margin* that
+  is unstable open-loop and pitches away from trim in a fraction of a second — too
+  fast for any human to catch.
+- An onboard **fly-by-wire** flight-control system — angle-of-attack and rate
+  feedback, pilot command augmentation, dynamic-pressure gain scheduling — turns
+  that divergent airframe into a docile one. **One key toggles it off**, so you
+  can feel the airframe depart the instant the computer stops flying it. That
+  contrast *is* the demo: a modern fighter is its control laws.
+- The instability is proven, not asserted: the short-period eigenvalues are
+  linearized about trim and sit in the **right-half plane open-loop**, the
+  **left-half plane closed-loop**.
+
 **Spherical world**
-- The planet is a **1/1000-scale Earth** (6371 m radius). The fixed-wing flies in
-  a planet-centered inertial frame with **radial, inverse-square gravity** and
-  **great-circle** routes — "straight and level" follows the curve of the
-  planet. The quadrotor flies in a flat local-tangent frame near home, where the
-  curvature is negligible.
+- The planet is a **1/1000-scale Earth** (6371 m radius). The fixed-wing flies in a
+  planet-centered inertial frame with **radial, inverse-square gravity** and
+  **great-circle** routes — "straight and level" follows the curve of the planet.
+  The quadrotor flies in a flat local-tangent frame near home, where the curvature
+  is negligible.
 
 **Tooling**
 - The deterministic simulation runs on its own thread, decoupled from rendering.
-- Bit-exact telemetry **record/replay** and a **parallel Monte-Carlo** harness
-  that runs faster than real time.
+- Bit-exact telemetry **record/replay** and a **parallel Monte-Carlo** harness that
+  runs faster than real time.
 - An interactive **3D viewer**: switch airframes, watch the aircraft fly over a
   displaced globe with a follow-camera, plan routes on a zoomable **planisphere**
   world map, and read live estimate-vs-truth telemetry.
@@ -72,8 +94,8 @@ seeded RNG per sensor — so a run reproduces bit-for-bit.
 ## Workspace layout
 
 The `fsim-core → … → fsim-control` crates form a **`no_std`-clean flight-control
-ring** (they build with `--no-default-features`); everything OS/GPU-bound lives
-only in `fsim-viz`.
+ring** (they build with `--no-default-features`); everything OS/GPU-bound lives only
+in `fsim-viz`.
 
 | Crate | Role |
 |-------|------|
@@ -82,9 +104,9 @@ only in `fsim-viz`.
 | `fsim-actuators` | Quadrotor control-allocation mixer + first-order motor model. |
 | `fsim-sensors` | `Sensor` trait + IMU / GPS / barometer / magnetometer models, each with its own seeded noise and bias random-walk. |
 | `fsim-estimator` | `Estimator` trait + complementary filter, quaternion MEKF, and 15-state INS. |
-| `fsim-control` | `Controller` trait + cascaded PID, LQR, position/velocity control, and the fixed-wing autopilot. |
-| `fsim-sim` | Deterministic scheduler, waypoint guidance, threaded engine, record/replay, Monte-Carlo, and the fixed-wing simulation. |
-| `fsim-viz` | Interactive `three-d` + `egui` viewer (std-only leaf crate). |
+| `fsim-control` | `Controller` trait + cascaded PID, LQR, position/velocity control, the fixed-wing autopilot, and the fly-by-wire stability system. |
+| `fsim-sim` | Deterministic scheduler, waypoint guidance, threaded engine, record/replay, Monte-Carlo, and the fixed-wing / manual-flight simulation. |
+| `fsim-viz` | Interactive `three-d` + `egui` viewer with keyboard/gamepad input (std-only leaf crate). |
 
 ## Conventions
 
@@ -96,9 +118,9 @@ Defined once in `fsim-core`:
 - **Angular rate** is expressed in the body frame (what the gyro measures).
 
 The fixed-wing's "world" is instead a planet-centered inertial frame; its local
-North-East-Down is a tangent frame derived from the current position. The
-equations of motion are frame-agnostic, so only gravity (now radial) and the
-navigation math (great circles) differ.
+North-East-Down is a tangent frame derived from the current position. The equations
+of motion are frame-agnostic, so only gravity (now radial) and the navigation math
+(great circles) differ.
 
 ## Building and running
 
@@ -112,13 +134,25 @@ cargo run -p fsim-sim  --release --example fixedwing_cruise # the fixed-wing cli
 cargo run -p fsim-sim  --example record_replay             # record a run, reload it, replay it
 ```
 
-In the viewer, an airframe toggle flies either the quad or the fixed-wing. The
-**Flight controls** panel switches the estimator (complementary / MEKF / INS) and
-the inner controller (PID / LQR) and sets the attitude or cruise target; the
-telemetry panel plots estimate vs. truth vs. setpoint. The **Route planner** is a
-zoomable world map — click to drop waypoints, then dispatch them to the active
-aircraft.
+In the viewer, the **airframe** selector flies the quad, the autopilot fixed-wing,
+or the **Fighter (FBW)**. The other panels switch the estimator (complementary /
+MEKF / INS) and inner controller (PID / LQR), set the attitude or cruise target,
+and plot estimate vs. truth vs. setpoint; the **Route planner** is a zoomable world
+map — click to drop waypoints, then dispatch them to the active aircraft.
 
+Pick **Fighter (FBW)** and you fly by hand:
+
+| | pitch | roll | yaw | throttle | toggle FCS | reset to trim |
+|---|---|---|---|---|---|---|
+| **keyboard** | `W` / `S` | `A` / `D` | `Q` / `E` | `Shift` / `Ctrl` | `F` | `R` |
+| **gamepad** | left stick | left stick | right stick | right stick | `A` | `Start` |
+
+> [!TIP]
+> Fly the fighter with the FCS on, then press `F`. With the stabilizer gone, the
+> relaxed-stability airframe diverges in under a second and no amount of stick will
+> save it — that is exactly why it is fly-by-wire.
+
+> [!NOTE]
 > The MEKF is an AHRS: it assumes the accelerometer sees gravity, so a sustained
 > translating maneuver degrades its attitude estimate. The INS removes this
 > limitation — try a large tilt under the MEKF, then switch to the INS.
@@ -126,10 +160,10 @@ aircraft.
 ## Toolchain & Ferrocene
 
 Develop on stable Rust. The code is kept compatible with
-[Ferrocene](https://ferrous-systems.com/ferrocene/) (the qualified Rust
-toolchain) by construction — MSRV 1.91 and a `no_std`-clean core. A dormant
-`criticalup.toml` is in place so the Ferrocene compiler can be swapped in without
-refactoring once a subscription token is configured:
+[Ferrocene](https://ferrous-systems.com/ferrocene/) (the qualified Rust toolchain)
+by construction — MSRV 1.91 and a `no_std`-clean core. A dormant `criticalup.toml`
+is in place so the Ferrocene compiler can be swapped in without refactoring once a
+subscription token is configured:
 
 ```bash
 criticalup auth set && criticalup install && criticalup run cargo build
@@ -137,11 +171,9 @@ criticalup auth set && criticalup install && criticalup run cargo build
 
 ## Possible extensions
 
-Sensors and the INS in the fixed-wing loop; wind and turbulence modeling
-(Dryden); orbit / Dubins guidance; and model-predictive control behind the
-`Controller` trait.
+Sensors and the INS in the fixed-wing loop; wind and turbulence modeling (Dryden);
+orbit / Dubins guidance; and model-predictive control behind the `Controller` trait.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE-2.0) or
-[MIT license](LICENSE-MIT), at your option.
+Licensed under the [Apache License, Version 2.0](LICENSE).

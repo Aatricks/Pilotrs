@@ -13,7 +13,7 @@ edition = "2021"
 # Ferrocene-compatible by construction. Develop on stable; swap in Ferrocene
 # via criticalup.toml once a subscription token exists.
 rust-version = "1.91"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 authors = ["Aatricks"]
 repository = "https://github.com/Aatricks/Pilotrs"
 
