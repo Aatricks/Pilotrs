@@ -785,10 +785,18 @@ fn main() {
                 map_trail.remove(0);
             }
         }
+        // A slim contrail that fades out along its older tail (oldest third
+        // tapers to nothing), rather than a fat uniform tube.
+        let n_trail = trail_pts.len().max(1) as f32;
         trail.set_instances(&Instances {
             transformations: trail_pts
                 .iter()
-                .map(|p| Mat4::from_translation(*p) * Mat4::from_scale(1.5))
+                .enumerate()
+                .map(|(i, p)| {
+                    let frac = i as f32 / n_trail; // 0 = oldest tail, 1 = nearest
+                    let s = 0.65 * (frac * 3.0).min(1.0);
+                    Mat4::from_translation(*p) * Mat4::from_scale(s.max(0.08))
+                })
                 .collect(),
             ..Default::default()
         });
