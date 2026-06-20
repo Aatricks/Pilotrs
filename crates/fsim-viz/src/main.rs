@@ -362,6 +362,58 @@ fn build_fw_body(context: &Context) -> (Vec<Gm<Mesh, PhysicalMaterial>>, Vec<Mat
     (parts, bases)
 }
 
+/// A scattered field of translucent cumulus puffs over the home region, at a
+/// couple of altitude decks. Each puff is a squashed sphere laid flat to the
+/// local horizon (`pci_from_ned`). Built once; a first cut to iterate on.
+fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
+    let r = planet::PLANET_RADIUS;
+    let mut xforms = Vec::new();
+    for i in -5i32..=5 {
+        for j in -5i32..=5 {
+            // A deterministic hash → gaps + size/altitude jitter for irregularity.
+            let h = (i * 7 + j * 13).rem_euclid(16) as f64;
+            if h < 5.0 {
+                continue; // leave clear sky between the clumps
+            }
+            let n = i as f64 * 600.0 + (h - 8.0) * 50.0;
+            let e = j as f64 * 600.0 + (h - 8.0) * 30.0;
+            let alt = 750.0 + h * 45.0; // ~750–1450 m, a couple of decks
+            let p = planet::geodetic_to_pci(n / r, e / r, alt);
+            let s = (100.0 + h * 14.0) as f32;
+            xforms.push(
+                Mat4::from_translation(to_v(&p))
+                    * to_rot(&planet::pci_from_ned(p))
+                    * Mat4::from_nonuniform_scale(s, s, s * 0.4),
+            );
+        }
+    }
+    Gm::new(
+        InstancedMesh::new(
+            context,
+            &Instances {
+                transformations: xforms,
+                ..Default::default()
+            },
+            &CpuMesh::sphere(12),
+        ),
+        // Alpha < 255 ⇒ three-d treats it as transparent and blends it.
+        PhysicalMaterial::new(
+            context,
+            &CpuMaterial {
+                albedo: Srgba {
+                    r: 244,
+                    g: 246,
+                    b: 250,
+                    a: 160,
+                },
+                roughness: 1.0,
+                metallic: 0.0,
+                ..Default::default()
+            },
+        ),
+    )
+}
+
 fn main() {
     let window = Window::new(WindowSettings {
         title: "Pilotrs — quad / fixed-wing over terrain".to_string(),
@@ -457,6 +509,11 @@ fn main() {
         opaque(&context, 90, 200, 210),
     );
     let mut trail_pts: Vec<Vec3> = Vec::new();
+
+    // Cloud layer: scattered translucent cumulus over the home region at a couple
+    // of altitude decks (a first visual cut — refine from screenshots). Each puff
+    // is a squashed sphere oriented flat to the local horizon via `pci_from_ned`.
+    let clouds = build_clouds(&context);
 
     // Minimap route planner (top-down) + the editable route + a downsampled
     // NED trail it paints.
@@ -861,6 +918,8 @@ fn main() {
                 }
             }
         }
+        // Clouds are translucent, so draw them last (after the opaque scene).
+        objects.push(&clouds);
         frame_input
             .screen()
             .clear(ClearState::color_and_depth(0.55, 0.70, 0.85, 1.0, 1.0))
