@@ -1,6 +1,7 @@
 //! The fixed-step scheduler: one struct that owns every subsystem and advances
 //! them deterministically.
 
+use crate::atmosphere::Atmosphere;
 use crate::config::{ControllerKind, EstimatorKind, SimConfig};
 use crate::guidance::{Guidance, GuidanceConfig, Waypoint};
 use crate::telemetry::{Telemetry, TelemetrySample};
@@ -54,6 +55,8 @@ pub struct Sim {
     control_mode: ControlMode,
     position_cfg: PositionConfig,
     rk4: Rk4,
+    /// The air the quad flies through (wind + turbulence).
+    atmosphere: Atmosphere,
 
     truth: State13,
     setpoint: Setpoint,
@@ -133,6 +136,7 @@ impl Sim {
             control_mode: ControlMode::Attitude,
             position_cfg: cfg.position,
             rk4: Rk4,
+            atmosphere: Atmosphere::new(cfg.atmosphere),
 
             truth: State13::at_rest(),
             setpoint: Setpoint::level(hover),
@@ -159,6 +163,26 @@ impl Sim {
     /// Override the truth state (e.g. start mid-air or with an initial tilt).
     pub fn set_truth(&mut self, truth: State13) {
         self.truth = truth;
+    }
+
+    /// Set the steady wind \[m/s, local NED\].
+    pub fn set_wind(&mut self, wind_ned: Vec3) {
+        self.atmosphere.set_wind(wind_ned);
+    }
+
+    /// Set the turbulence intensity (RMS gust \[m/s\]; 0 = calm).
+    pub fn set_turbulence(&mut self, rms: Real) {
+        self.atmosphere.set_turbulence(rms);
+    }
+
+    /// Steady wind speed \[m/s\] (for the HUD).
+    pub fn wind_speed(&self) -> Real {
+        self.atmosphere.wind_speed()
+    }
+
+    /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
+    pub fn gust(&self) -> Real {
+        self.atmosphere.gust_magnitude()
     }
 
     /// Set the active attitude/thrust setpoint (the viewer calls this live).
@@ -255,13 +279,21 @@ impl Sim {
     pub fn step(&mut self) {
         let t = self.time();
 
+        // Wind (flat local NED is the quad's world) — advance the atmosphere once
+        // per step and use the same value for the accelerometer's specific force
+        // and the integration, so drag is air-relative and the IMU sees it.
+        let wind = self
+            .atmosphere
+            .wind_ned(self.truth.velocity.norm(), self.dt);
+
         // 1. True acceleration acting right now, from the motor thrust that was
         //    in effect over the just-completed interval. The accelerometer
         //    needs this (it isn't part of State13).
         let held = self.mixer.collect(&self.motors.thrust());
-        let accel_world = aerodynamic_wrench(&self.truth, &self.params, held.thrust, held.torque)
-            .force_world
-            / self.params.mass;
+        let accel_world =
+            aerodynamic_wrench(&self.truth, &self.params, held.thrust, held.torque, wind)
+                .force_world
+                / self.params.mass;
 
         // 2. Sensors + estimator (each gated to its own rate). The order is
         //    predict (IMU + its internal gravity update) → mag → baro → gps;
@@ -323,7 +355,7 @@ impl Sim {
         let (thrust, torque) = (achieved.thrust, achieved.torque);
         self.truth = self.rk4.step(
             &self.truth,
-            |x| plant.deriv(x, &aerodynamic_wrench(x, &params, thrust, torque)),
+            |x| plant.deriv(x, &aerodynamic_wrench(x, &params, thrust, torque, wind)),
             self.dt,
         );
 
@@ -654,5 +686,69 @@ mod tests {
             max_est_err < 0.08,
             "estimate error grew to {max_est_err} rad"
         );
+    }
+
+    // --- Weather (wind + turbulence) ---
+
+    /// Hover the default quad through the given air for 5 s, returning the truth.
+    fn quad_hover_in_weather(wind_ned: Vec3, turbulence: Real) -> State13 {
+        let mut cfg = SimConfig::quad_250_mvp();
+        cfg.atmosphere = crate::AtmosphereConfig::wind(wind_ned, turbulence);
+        let mut sim = Sim::new(cfg);
+        sim.run_headless(5000);
+        *sim.truth()
+    }
+
+    // A steady wind drags the hovering quad downwind (attitude mode has no
+    // position hold), carrying it toward the wind speed as the drag falls to zero.
+    #[test]
+    fn quad_drifts_downwind() {
+        let calm = quad_hover_in_weather(Vec3::zeros(), 0.0);
+        let windy = quad_hover_in_weather(Vec3::new(0.0, 6.0, 0.0), 0.0); // wind toward +East
+        assert!(
+            calm.position.norm() < 0.5,
+            "calm hover should stay put: {}",
+            calm.position.norm()
+        );
+        assert!(
+            windy.position.y > 5.0,
+            "a 6 m/s east wind should drift the quad east: {}",
+            windy.position.y
+        );
+        assert!(
+            (windy.velocity.y - 6.0).abs() < 2.0,
+            "the quad should be carried toward the wind speed: {}",
+            windy.velocity.y
+        );
+    }
+
+    // Turbulence buffets the quad, but it rides it out — finite, upright, and not
+    // blown away. (Linear drag applies no moment, so gusts perturb position more
+    // than attitude — which the controller holds.)
+    #[test]
+    fn quad_survives_turbulence() {
+        let s = quad_hover_in_weather(Vec3::zeros(), 3.0);
+        assert!(
+            s.position.iter().all(|x| x.is_finite()) && s.attitude.angle() < 0.3,
+            "quad should ride out turbulence upright: att {} rad",
+            s.attitude.angle()
+        );
+        assert!(
+            s.position.norm() < 30.0,
+            "should not be blown away: {} m",
+            s.position.norm()
+        );
+    }
+
+    // T-QuadWeatherDeterminism: wind + seeded turbulence is reproducible.
+    #[test]
+    fn quad_weather_is_deterministic() {
+        let run = || quad_hover_in_weather(Vec3::new(-3.0, 2.0, 0.0), 3.0);
+        let a = run();
+        let b = run();
+        assert_eq!(a.position, b.position);
+        assert_eq!(a.velocity, b.velocity);
+        assert_eq!(a.attitude, b.attitude);
+        assert_eq!(a.angular_rate, b.angular_rate);
     }
 }

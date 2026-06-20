@@ -67,8 +67,8 @@ impl ViewSnapshot {
             fbw_on: false,
             alpha: 0.0,
             load_factor: 0.0,
-            wind_speed: 0.0,
-            gust: 0.0,
+            wind_speed: s.wind_speed,
+            gust: s.gust,
         }
     }
 

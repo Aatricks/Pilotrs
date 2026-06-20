@@ -516,6 +516,13 @@ fn main() {
                 AircraftKind::Quad => {
                     source.quad_command(Command::Pause(ui.paused));
                     source.quad_command(Command::SetSpeed(ui.speed as f64));
+                    // Weather: a crosswind toward the east + turbulence.
+                    source.quad_command(Command::SetWind(fsim_sim::Vec3::new(
+                        0.0,
+                        ui.wind_speed as f64,
+                        0.0,
+                    )));
+                    source.quad_command(Command::SetTurbulence(ui.turbulence as f64));
                     let in_mission = ui.mission_on && ui.est_kind == 2;
                     if !in_mission {
                         source.quad_command(Command::SetSetpoint(Setpoint {
@@ -883,14 +890,10 @@ fn controls_window(
                         ui.monospace(format!("flying route — leg {idx}"));
                     }
                 }
-                if st.fixed_wing {
-                    ui.separator();
-                    ui.label("weather");
-                    ui.add(egui::Slider::new(&mut st.wind_speed, 0.0..=15.0).text("wind (m/s)"));
-                    ui.add(
-                        egui::Slider::new(&mut st.turbulence, 0.0..=8.0).text("turbulence (m/s)"),
-                    );
-                }
+                ui.separator();
+                ui.label("weather");
+                ui.add(egui::Slider::new(&mut st.wind_speed, 0.0..=15.0).text("wind (m/s)"));
+                ui.add(egui::Slider::new(&mut st.turbulence, 0.0..=8.0).text("turbulence (m/s)"));
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut st.paused, "pause");

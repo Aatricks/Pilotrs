@@ -164,7 +164,7 @@ mod tests {
             |x| {
                 body.deriv(
                     x,
-                    &aerodynamic_wrench(x, &body.params, cmd.thrust, cmd.torque),
+                    &aerodynamic_wrench(x, &body.params, cmd.thrust, cmd.torque, Vec3::zeros()),
                 )
             },
             dt,

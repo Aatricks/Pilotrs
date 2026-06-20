@@ -35,6 +35,10 @@ pub struct Snapshot {
     /// Whether the estimator reports a gyro bias (false for the CF).
     pub has_bias: bool,
     pub waypoint_index: Option<usize>,
+    /// Steady wind speed \[m/s\] (for the HUD).
+    pub wind_speed: Real,
+    /// Instantaneous turbulence gust magnitude \[m/s\] (for the HUD).
+    pub gust: Real,
     pub paused: bool,
     pub recording: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
@@ -56,6 +60,8 @@ impl Snapshot {
             est_gyro_bias: eb.unwrap_or_else(Vec3::zeros),
             has_bias: eb.is_some(),
             waypoint_index: sim.waypoint_index(),
+            wind_speed: sim.wind_speed(),
+            gust: sim.gust(),
             paused,
             recording,
             seq,
@@ -82,6 +88,8 @@ impl Snapshot {
             est_gyro_bias: s.est_gyro_bias,
             has_bias: s.est_gyro_bias != Vec3::zeros(),
             waypoint_index: None,
+            wind_speed: 0.0, // recordings predate the weather model
+            gust: 0.0,
             paused: false,
             recording: false,
             seq: 0,
@@ -116,6 +124,10 @@ pub enum Command {
     },
     /// Return to attitude mode, holding the current setpoint.
     SetAttitudeMode,
+    /// Set the steady wind \[m/s, local NED\].
+    SetWind(Vec3),
+    /// Set the turbulence intensity (RMS gust \[m/s\]; 0 = calm).
+    SetTurbulence(Real),
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -313,6 +325,8 @@ impl Worker {
                 let sp = self.sim.setpoint();
                 self.sim.set_setpoint(sp);
             }
+            Command::SetWind(w) => self.sim.set_wind(w),
+            Command::SetTurbulence(rms) => self.sim.set_turbulence(rms),
             Command::Pause(p) => self.paused = p,
             Command::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             Command::Reset(cfg) => {

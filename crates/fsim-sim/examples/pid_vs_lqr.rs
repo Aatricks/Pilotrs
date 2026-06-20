@@ -53,7 +53,13 @@ fn step_response(kind: ControllerKind) -> (f64, f64, f64, f64) {
             |x| {
                 body.deriv(
                     x,
-                    &aerodynamic_wrench(x, &params, achieved.thrust, achieved.torque),
+                    &aerodynamic_wrench(
+                        x,
+                        &params,
+                        achieved.thrust,
+                        achieved.torque,
+                        Vec3::zeros(),
+                    ),
                 )
             },
             1e-3,

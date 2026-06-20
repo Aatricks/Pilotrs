@@ -1,5 +1,6 @@
 //! Everything needed to build a [`Sim`](crate::Sim), with presets.
 
+use crate::atmosphere::AtmosphereConfig;
 use fsim_control::{CascadedConfig, LqrConfig, PositionConfig};
 use fsim_core::{Real, DEFAULT_DT};
 use fsim_dynamics::MultirotorParams;
@@ -76,6 +77,9 @@ pub struct SimConfig {
 
     /// Master RNG seed (each sensor derives an independent stream from it).
     pub seed: u64,
+
+    /// The air the quad flies through (wind + turbulence). Defaults to calm.
+    pub atmosphere: AtmosphereConfig,
 }
 
 impl SimConfig {
@@ -104,6 +108,7 @@ impl SimConfig {
             max_thrust: 4.0,
             motor_tau: 0.0,
             seed: 0xC0FFEE,
+            atmosphere: AtmosphereConfig::calm(),
         }
     }
 

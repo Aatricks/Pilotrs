@@ -9,18 +9,21 @@ use fsim_core::{gravity_world, Real, State13, Vec3, Wrench};
 /// - **Gravity** acts along world `+z` (NED down): `m·g`.
 /// - **Thrust** is collective, directed along body `-z` (FRD up) and rotated
 ///   into the world frame by the attitude.
-/// - **Drag** is a simple linear model opposing world velocity.
+/// - **Drag** is a simple linear model opposing the **air-relative** velocity
+///   `velocity − wind_world`, so wind blows the quad around (pass `Vec3::zeros()`
+///   for still air).
 /// - **Moment** is the mixer's commanded body torque (rotor differential).
 pub fn aerodynamic_wrench(
     state: &State13,
     params: &MultirotorParams,
     collective_thrust: Real,
     body_torque: Vec3,
+    wind_world: Vec3,
 ) -> Wrench {
     let weight = gravity_world() * params.mass;
     // Thrust pushes "up" = body -z; rotate body -> world.
     let thrust_world = state.attitude * Vec3::new(0.0, 0.0, -collective_thrust);
-    let drag = state.velocity * (-params.drag_coeff);
+    let drag = (state.velocity - wind_world) * (-params.drag_coeff);
 
     Wrench {
         force_world: weight + thrust_world + drag,
@@ -47,7 +50,12 @@ mod tests {
         for _ in 0..n {
             s = rk4.step(
                 &s,
-                |x| body.deriv(x, &aerodynamic_wrench(x, &body.params, thrust, torque)),
+                |x| {
+                    body.deriv(
+                        x,
+                        &aerodynamic_wrench(x, &body.params, thrust, torque, Vec3::zeros()),
+                    )
+                },
                 dt,
             );
         }
