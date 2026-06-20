@@ -427,7 +427,8 @@ fn build_fw_body(context: &Context) -> (Vec<Gm<Mesh, PhysicalMaterial>>, Vec<Mat
     (parts, bases)
 }
 
-/// A scattered field of fluffy cumulus over the home region at a couple of
+/// A scattered field of fluffy cumulus spread across the **whole globe** (so
+/// zooming out shows a cloud-flecked planet, not a cap over home), at a few
 /// altitude decks. Each cloud is a *cluster* of overlapping spheres (a lumpy
 /// billow, not a flat disc), laid flat to the local horizon via `pci_from_ned`.
 /// Opaque white with an emissive lift so the undersides stay bright rather than
@@ -445,29 +446,36 @@ fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
         (0.6, 0.9, 0.15, 0.50),
     ];
     let mut xforms = Vec::new();
-    for i in -5i32..=5 {
-        for j in -5i32..=5 {
-            // A deterministic hash → gaps + size/altitude jitter for irregularity.
-            let h = (i * 7 + j * 13).rem_euclid(16) as f64;
-            if h < 5.0 {
-                continue; // leave clear sky between the clumps
-            }
-            let n = i as f64 * 650.0 + (h - 8.0) * 50.0;
-            let e = j as f64 * 650.0 + (h - 8.0) * 30.0;
-            let alt = 800.0 + h * 45.0; // ~800–1500 m, a couple of decks
-            let p = planet::geodetic_to_pci(n / r, e / r, alt);
-            let q = planet::pci_from_ned(p);
-            let rot = to_rot(&q);
-            let base = 65.0 + h * 9.0; // puff radius [m]
-            for (dx, dy, dz, sc) in lobes {
-                let off = q * fsim_sim::Vec3::new(dx * base, dy * base, dz * base);
-                let s = (base * sc) as f32;
-                xforms.push(
-                    Mat4::from_translation(to_v(&(p + off)))
-                        * rot
-                        * Mat4::from_nonuniform_scale(s, s, s * 0.78),
-                );
-            }
+    // Distribute cluster centres evenly over the sphere (a Fibonacci spiral); an
+    // integer hash opens ~40% clear sky and jitters each cloud's size/altitude.
+    let golden = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+    let count = 440usize;
+    for k in 0..count {
+        let mut h = (k as u32).wrapping_mul(2_654_435_761);
+        h ^= h >> 15;
+        h = h.wrapping_mul(2_246_822_519);
+        h ^= h >> 13;
+        if h % 100 < 40 {
+            continue; // clear patches of sky
+        }
+        // Fibonacci-sphere unit direction.
+        let yv = 1.0 - 2.0 * (k as f64 + 0.5) / count as f64;
+        let ring = (1.0 - yv * yv).max(0.0).sqrt();
+        let theta = golden * k as f64;
+        let dir = fsim_sim::Vec3::new(ring * theta.cos(), yv, ring * theta.sin());
+        let alt = 780.0 + (h % 7) as f64 * 55.0; // a few decks, ~780–1110 m
+        let p = dir * (r + alt);
+        let q = planet::pci_from_ned(p);
+        let rot = to_rot(&q);
+        let base = 60.0 + (h % 5) as f64 * 12.0; // puff radius [m]
+        for (dx, dy, dz, sc) in lobes {
+            let off = q * fsim_sim::Vec3::new(dx * base, dy * base, dz * base);
+            let s = (base * sc) as f32;
+            xforms.push(
+                Mat4::from_translation(to_v(&(p + off)))
+                    * rot
+                    * Mat4::from_nonuniform_scale(s, s, s * 0.78),
+            );
         }
     }
     Gm::new(
@@ -477,7 +485,7 @@ fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
                 transformations: xforms,
                 ..Default::default()
             },
-            &CpuMesh::sphere(12),
+            &CpuMesh::sphere(10),
         ),
         PhysicalMaterial::new_opaque(
             context,
