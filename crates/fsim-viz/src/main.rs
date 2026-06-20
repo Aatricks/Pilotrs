@@ -31,8 +31,9 @@ mod terrain;
 
 use fsim_sim::planet;
 use fsim_sim::{
-    Command, ControllerKind, FixedWingSetpoint, FwCommand, FwGuidanceConfig, FwSample, FwSimConfig,
-    GuidanceConfig, Quat, Recording, Setpoint, SimConfig, TelemetrySample, Waypoint,
+    Command, ControllerKind, FixedWingSetpoint, FwCommand, FwFaults, FwGuidanceConfig, FwSample,
+    FwSimConfig, GuidanceConfig, QuadFaults, Quat, Recording, Setpoint, SimConfig, SurfaceFault,
+    TelemetrySample, Waypoint,
 };
 use input::StickSource;
 use minimap::{Minimap, MinimapActions, MinimapView, Route, TerrainLike};
@@ -73,6 +74,9 @@ struct Ui {
     // Weather (fixed-wing): steady wind speed + turbulence RMS [m/s].
     wind_speed: f32,
     turbulence: f32,
+    // Injected faults (sent to the live engine each frame).
+    fw_faults: FwFaults,
+    quad_dead_rotor: Option<usize>,
     /// True while a drawn route is installed on the fixed-wing engine — gates
     /// off the per-frame manual `SetCruise` so it can't cancel the route
     /// (synchronous; avoids racing the lagging snapshot).
@@ -474,6 +478,8 @@ fn main() {
         fw_altitude: 400.0, // above the ~320 m mountain peaks
         wind_speed: 0.0,
         turbulence: 0.0,
+        fw_faults: FwFaults::none(),
+        quad_dead_rotor: None,
         fw_route_on: false,
         paused: false,
         speed: 1.0,
@@ -527,6 +533,9 @@ fn main() {
                         0.0,
                     )));
                     source.quad_command(Command::SetTurbulence(ui.turbulence as f64));
+                    source.quad_command(Command::SetFaults(QuadFaults {
+                        dead_rotor: ui.quad_dead_rotor,
+                    }));
                     let in_mission = ui.mission_on && ui.est_kind == 2;
                     if !in_mission {
                         source.quad_command(Command::SetSetpoint(Setpoint {
@@ -549,6 +558,7 @@ fn main() {
                         0.0,
                     )));
                     source.fw_command(FwCommand::SetTurbulence(ui.turbulence as f64));
+                    source.fw_command(FwCommand::SetFaults(ui.fw_faults));
                     if ui.fighter {
                         // Pilot in the loop: drive the fly-by-wire from the stick.
                         // The F-key/gamepad edge flips our authoritative intent.
@@ -928,6 +938,22 @@ fn controls_window(
                     }
                 });
                 ui.separator();
+                ui.label("faults");
+                if st.fixed_wing {
+                    fault_controls(ui, st);
+                } else {
+                    ui.horizontal(|ui| {
+                        for i in 0..4 {
+                            if ui.button(format!("kill rotor {i}")).clicked() {
+                                st.quad_dead_rotor = Some(i);
+                            }
+                        }
+                        if ui.button("repair").clicked() {
+                            st.quad_dead_rotor = None;
+                        }
+                    });
+                }
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut st.paused, "pause");
                     if ui.button("reset").clicked() {
@@ -1022,6 +1048,30 @@ fn fighter_controls(ui: &mut egui::Ui, st: &mut Ui) {
     ui.add(egui::Slider::new(&mut st.fw_altitude, 100.0..=1500.0).text("spawn alt (m)"));
 }
 
+/// The fixed-wing fault toggles: engine, control surfaces, tail.
+fn fault_controls(ui: &mut egui::Ui, st: &mut Ui) {
+    ui.checkbox(&mut st.fw_faults.engine_out, "engine out");
+    ui.checkbox(&mut st.fw_faults.tail_loss, "tail loss");
+    jam_checkbox(ui, "jam elevator", &mut st.fw_faults.elevator);
+    jam_checkbox(ui, "jam aileron", &mut st.fw_faults.aileron);
+    jam_checkbox(ui, "jam rudder", &mut st.fw_faults.rudder);
+    if ui.button("repair").clicked() {
+        st.fw_faults = FwFaults::none();
+    }
+}
+
+/// A checkbox that jams a surface at neutral (on) or clears the fault (off).
+fn jam_checkbox(ui: &mut egui::Ui, label: &str, surf: &mut SurfaceFault) {
+    let mut on = matches!(surf, SurfaceFault::Jammed(_));
+    if ui.checkbox(&mut on, label).changed() {
+        *surf = if on {
+            SurfaceFault::Jammed(0.0)
+        } else {
+            SurfaceFault::Normal
+        };
+    }
+}
+
 /// The pilot HUD overlay for the fighter: a prominent FCS ON/OFF banner (with a
 /// DIVERGING warning when off) plus an airspeed/altitude/AoA/g readout. Drawn as
 /// borderless anchored egui areas over the 3D scene.
@@ -1051,6 +1101,13 @@ fn hud_overlay(ctx: &egui::Context, view: &ViewSnapshot, has_gamepad: bool) {
                     ui.label(
                         egui::RichText::new("⛈ STORM")
                             .color(egui::Color32::from_rgb(255, 200, 40))
+                            .strong(),
+                    );
+                }
+                if view.faulted {
+                    ui.label(
+                        egui::RichText::new("⚠ FAULT")
+                            .color(egui::Color32::from_rgb(235, 70, 60))
                             .strong(),
                     );
                 }

@@ -11,6 +11,7 @@
 
 use crate::atmosphere::StormCell;
 use crate::config::{EstimatorKind, SimConfig};
+use crate::faults::QuadFaults;
 use crate::guidance::Waypoint;
 use crate::telemetry::{Telemetry, TelemetrySample};
 use crate::{GuidanceConfig, Sim};
@@ -42,6 +43,8 @@ pub struct Snapshot {
     pub gust: Real,
     /// Storm proximity (0 = clear air, 1 = microburst core).
     pub storm: Real,
+    /// A fault is active (for the HUD).
+    pub faulted: bool,
     pub paused: bool,
     pub recording: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
@@ -66,6 +69,7 @@ impl Snapshot {
             wind_speed: sim.wind_speed(),
             gust: sim.gust(),
             storm: sim.storm_intensity(),
+            faulted: sim.faulted(),
             paused,
             recording,
             seq,
@@ -95,6 +99,7 @@ impl Snapshot {
             wind_speed: 0.0, // recordings predate the weather model
             gust: 0.0,
             storm: 0.0,
+            faulted: false,
             paused: false,
             recording: false,
             seq: 0,
@@ -135,6 +140,8 @@ pub enum Command {
     SetTurbulence(Real),
     /// Place (or clear) the storm / microburst cell.
     SetStorm(Option<StormCell>),
+    /// Inject (or clear) effector faults (a dead rotor).
+    SetFaults(QuadFaults),
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -335,6 +342,7 @@ impl Worker {
             Command::SetWind(w) => self.sim.set_wind(w),
             Command::SetTurbulence(rms) => self.sim.set_turbulence(rms),
             Command::SetStorm(s) => self.sim.set_storm(s),
+            Command::SetFaults(f) => self.sim.set_faults(f),
             Command::Pause(p) => self.paused = p,
             Command::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             Command::Reset(cfg) => {

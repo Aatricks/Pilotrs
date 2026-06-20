@@ -12,6 +12,7 @@
 
 use crate::atmosphere::StormCell;
 use crate::engine::EngineClosed;
+use crate::faults::FwFaults;
 use crate::fixedwing::{FwSample, FwSim, FwSimConfig};
 use crate::fw_guidance::FwGuidanceConfig;
 use crate::guidance::Waypoint;
@@ -50,6 +51,8 @@ pub struct FwSnapshot {
     pub gust: Real,
     /// Storm proximity (0 = clear air, 1 = microburst core).
     pub storm: Real,
+    /// A fault is active (for the HUD).
+    pub faulted: bool,
     pub paused: bool,
     /// Publish counter — advances every iteration, even when paused (distinct
     /// from `tick`, which only advances when the physics steps).
@@ -75,6 +78,7 @@ impl FwSnapshot {
             wind_speed: sim.wind_speed(),
             gust: sim.gust(),
             storm: sim.storm_intensity(),
+            faulted: sim.faulted(),
             paused,
             seq,
         }
@@ -125,6 +129,8 @@ pub enum FwCommand {
     SetTurbulence(Real),
     /// Place (or clear) the storm / microburst cell.
     SetStorm(Option<StormCell>),
+    /// Inject (or clear) effector / powerplant faults.
+    SetFaults(FwFaults),
     Pause(bool),
     /// Real-time speed multiplier (clamped to [0, 16]); ignored in fixed-step.
     SetSpeed(f64),
@@ -287,6 +293,7 @@ impl Worker {
             FwCommand::SetWind(w) => self.sim.set_wind(w),
             FwCommand::SetTurbulence(rms) => self.sim.set_turbulence(rms),
             FwCommand::SetStorm(s) => self.sim.set_storm(s),
+            FwCommand::SetFaults(f) => self.sim.set_faults(f),
             FwCommand::Pause(p) => self.paused = p,
             FwCommand::SetSpeed(s) => self.speed = s.clamp(0.0, 16.0),
             FwCommand::Reset(cfg) => {

@@ -8,6 +8,7 @@
 //! and the INS is a one-line `est` change left for future work.
 
 use crate::atmosphere::{Atmosphere, AtmosphereConfig, StormCell};
+use crate::faults::FwFaults;
 use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
 use crate::guidance::Waypoint;
 use fsim_control::{
@@ -187,6 +188,8 @@ pub struct FwSim {
     fbw_cfg: FbwConfig,
     /// The air the aircraft flies through.
     atmosphere: Atmosphere,
+    /// Injected effector / powerplant faults.
+    faults: FwFaults,
     /// Last setpoint actually applied to the autopilot (logged each sample).
     setpoint: FixedWingSetpoint,
     /// Setpoint-hold / route-follow / manual (selects how `step` builds surfaces).
@@ -218,6 +221,7 @@ impl FwSim {
             autopilot: Box::new(FixedWingAutopilot::new(cfg.autopilot)),
             fbw_cfg: cfg.fbw,
             atmosphere: Atmosphere::new(cfg.atmosphere),
+            faults: FwFaults::none(),
             setpoint: cfg.setpoint,
             mode,
             controls: FixedWingControls::zero(),
@@ -347,6 +351,16 @@ impl FwSim {
         self.atmosphere.set_storm(storm);
     }
 
+    /// Inject (or clear) effector / powerplant faults.
+    pub fn set_faults(&mut self, faults: FwFaults) {
+        self.faults = faults;
+    }
+
+    /// True if any fault is active (for the HUD).
+    pub fn faulted(&self) -> bool {
+        self.faults.any()
+    }
+
     /// Steady wind speed \[m/s\] (for the HUD).
     pub fn wind_speed(&self) -> Real {
         self.atmosphere.wind_speed()
@@ -416,7 +430,7 @@ impl FwSim {
             if let FwMode::Route(g) = &mut self.mode {
                 self.setpoint = g.update(self.truth.position);
             }
-            self.controls = match &mut self.mode {
+            let commanded = match &mut self.mode {
                 // Pilot-in-the-loop: fly-by-wire (or passthrough) from the stick.
                 FwMode::Manual {
                     fbw,
@@ -429,6 +443,9 @@ impl FwSim {
                 }
             }
             .clamp(&self.params.limits);
+            // Effector faults sit between the command and the surfaces: a jammed
+            // or floating surface ignores the controller's wishes.
+            self.controls = self.faults.apply_controls(commanded);
         }
 
         // Wind in the world (PCI) frame: advance the atmosphere exactly once per
@@ -443,14 +460,15 @@ impl FwSim {
             .wind_ned(pos_n, pos_e, self.truth.velocity.norm(), self.dt);
         let wind_world = planet::pci_from_ned(self.truth.position) * wind_ned;
 
-        let p = &self.params;
+        // Airframe-damage faults (tail loss) degrade the aero coefficients.
+        let p = self.faults.apply_params(self.params);
         let c = self.controls;
         self.truth = Rk4.step(
             &self.truth,
             |x| {
                 rigid_body_deriv(
                     x,
-                    &fixedwing_wrench(x, p, &c, wind_world, planet::gravity_at(x.position)),
+                    &fixedwing_wrench(x, &p, &c, wind_world, planet::gravity_at(x.position)),
                     p.mass,
                     &p.inertia,
                     &p.inertia_inv,
@@ -1095,5 +1113,88 @@ mod tests {
             sim.storm_intensity()
         );
         assert!(sim.truth().position.iter().all(|x| x.is_finite()));
+    }
+
+    // --- Faults ---
+
+    /// Fly the fighter (FCS on, neutral stick) with the given faults, returning
+    /// the worst body-rate magnitude over `secs` seconds.
+    fn fighter_with_fault(faults: FwFaults, secs: f64) -> Real {
+        let cfg = FwSimConfig::fighter_manual(400.0);
+        let trim_throttle = cfg.fbw.throttle_trim;
+        let mut sim = FwSim::new(cfg);
+        sim.set_faults(faults);
+        sim.set_stick(StickInput {
+            pitch: 0.0,
+            roll: 0.0,
+            yaw: 0.0,
+            throttle: trim_throttle,
+        });
+        let mut worst = 0.0_f64;
+        for _ in 0..(secs / DEFAULT_DT) as usize {
+            sim.step();
+            worst = worst.max(sim.truth().angular_rate.norm());
+        }
+        worst
+    }
+
+    // A control surface jammed away from trim is, on the relaxed fighter, as good
+    // as switching the FCS off: the fly-by-wire can no longer move the elevator to
+    // stabilize the divergent pitch mode, and it departs.
+    #[test]
+    fn jammed_elevator_loses_the_fighter() {
+        let healthy = fighter_with_fault(FwFaults::none(), 4.0);
+        let jammed = fighter_with_fault(
+            FwFaults {
+                elevator: crate::SurfaceFault::Jammed(0.0),
+                ..FwFaults::none()
+            },
+            4.0,
+        );
+        assert!(
+            healthy < 0.6,
+            "the healthy fighter is controlled: {healthy}"
+        );
+        assert!(
+            jammed > 1.5,
+            "a jammed elevator should lose the relaxed fighter: {jammed}"
+        );
+    }
+
+    // Losing the tail (no elevator/rudder + gutted pitch/yaw damping) loses it too.
+    #[test]
+    fn tail_loss_loses_the_fighter() {
+        let worst = fighter_with_fault(
+            FwFaults {
+                tail_loss: true,
+                ..FwFaults::none()
+            },
+            4.0,
+        );
+        assert!(
+            worst > 1.5,
+            "losing the tail should lose the fighter: {worst}"
+        );
+    }
+
+    // Engine-out is survivable but unmistakable: with the throttle pinned to zero
+    // the Aerosonde bleeds airspeed (the autopilot trades it for altitude) — a
+    // dead-stick glide rather than a sudden departure.
+    #[test]
+    fn engine_out_bleeds_airspeed() {
+        let mut sim = FwSim::new(FwSimConfig::aerosonde_cruise());
+        sim.run_headless(3000); // settle the cruise
+        let va0 = sim.airspeed();
+        sim.set_faults(FwFaults {
+            engine_out: true,
+            ..FwFaults::none()
+        });
+        sim.run_headless(15_000); // 15 s on no power
+        assert!(
+            sim.airspeed() < va0 - 3.0,
+            "engine-out should bleed airspeed: {va0:.1} -> {:.1} m/s",
+            sim.airspeed()
+        );
+        assert!(sim.faulted(), "fault flag should be set");
     }
 }

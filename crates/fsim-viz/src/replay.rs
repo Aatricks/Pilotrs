@@ -52,6 +52,8 @@ pub struct ViewSnapshot {
     pub gust: Real,
     /// Storm proximity (0 = clear air, 1 = microburst core).
     pub storm: Real,
+    /// A fault is active (for the HUD).
+    pub faulted: bool,
 }
 
 impl ViewSnapshot {
@@ -72,6 +74,7 @@ impl ViewSnapshot {
             wind_speed: s.wind_speed,
             gust: s.gust,
             storm: s.storm,
+            faulted: s.faulted,
         }
     }
 
@@ -92,6 +95,7 @@ impl ViewSnapshot {
             wind_speed: s.wind_speed,
             gust: s.gust,
             storm: s.storm,
+            faulted: s.faulted,
         }
     }
 

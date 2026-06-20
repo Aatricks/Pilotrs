@@ -3,6 +3,7 @@
 
 use crate::atmosphere::{Atmosphere, StormCell};
 use crate::config::{ControllerKind, EstimatorKind, SimConfig};
+use crate::faults::QuadFaults;
 use crate::guidance::{Guidance, GuidanceConfig, Waypoint};
 use crate::telemetry::{Telemetry, TelemetrySample};
 use fsim_actuators::{Mixer, MotorModel, XQuadMixer};
@@ -57,6 +58,8 @@ pub struct Sim {
     rk4: Rk4,
     /// The air the quad flies through (wind + turbulence).
     atmosphere: Atmosphere,
+    /// Injected effector faults (a dead rotor).
+    faults: QuadFaults,
 
     truth: State13,
     setpoint: Setpoint,
@@ -137,6 +140,7 @@ impl Sim {
             position_cfg: cfg.position,
             rk4: Rk4,
             atmosphere: Atmosphere::new(cfg.atmosphere),
+            faults: QuadFaults::none(),
 
             truth: State13::at_rest(),
             setpoint: Setpoint::level(hover),
@@ -178,6 +182,16 @@ impl Sim {
     /// Place (or clear) the storm / microburst cell.
     pub fn set_storm(&mut self, storm: Option<StormCell>) {
         self.atmosphere.set_storm(storm);
+    }
+
+    /// Inject (or clear) effector faults (a dead rotor).
+    pub fn set_faults(&mut self, faults: QuadFaults) {
+        self.faults = faults;
+    }
+
+    /// True if any fault is active (for the HUD).
+    pub fn faulted(&self) -> bool {
+        self.faults.any()
     }
 
     /// Steady wind speed \[m/s\] (for the HUD).
@@ -303,7 +317,9 @@ impl Sim {
         // 1. True acceleration acting right now, from the motor thrust that was
         //    in effect over the just-completed interval. The accelerometer
         //    needs this (it isn't part of State13).
-        let held = self.mixer.collect(&self.motors.thrust());
+        let held = self
+            .mixer
+            .collect(&self.faults.apply_motors(self.motors.thrust()));
         let accel_world =
             aerodynamic_wrench(&self.truth, &self.params, held.thrust, held.torque, wind)
                 .force_world
@@ -359,7 +375,10 @@ impl Sim {
 
         // 4. Allocate to motors and apply the motor model.
         let motor_cmd = self.mixer.mix(&self.cmd);
-        let actual = self.motors.update(&motor_cmd, self.dt);
+        // A dead rotor produces no thrust no matter what the mixer commands.
+        let actual = self
+            .faults
+            .apply_motors(self.motors.update(&motor_cmd, self.dt));
         let achieved = self.mixer.collect(&actual);
 
         // 5. Integrate truth one step (copies avoid borrowing `self` in the
@@ -764,5 +783,29 @@ mod tests {
         assert_eq!(a.velocity, b.velocity);
         assert_eq!(a.attitude, b.attitude);
         assert_eq!(a.angular_rate, b.angular_rate);
+    }
+
+    // --- Faults ---
+
+    // A standard X-quad cannot hold attitude on three motors: kill a rotor and the
+    // craft departs (the mixer can no longer produce the commanded torque).
+    #[test]
+    fn dead_rotor_upsets_the_quad() {
+        let mut sim = Sim::new(SimConfig::quad_250_mvp());
+        sim.run_headless(1000); // hover a moment
+        assert!(
+            sim.truth().attitude.angle() < 0.05,
+            "level before the failure"
+        );
+        sim.set_faults(crate::QuadFaults {
+            dead_rotor: Some(0),
+        });
+        assert!(sim.faulted());
+        sim.run_headless(3000); // 3 s on three motors
+        assert!(
+            sim.truth().attitude.angle() > 0.5,
+            "a dead rotor should upset the quad: {} rad",
+            sim.truth().attitude.angle()
+        );
     }
 }
