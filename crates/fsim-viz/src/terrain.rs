@@ -753,6 +753,87 @@ impl Terrain {
             ..Default::default()
         }
     }
+
+    /// A high-resolution local terrain patch: a `cells × cells` tangent-plane grid
+    /// of directions around `center`, each projected onto the sphere, displaced by
+    /// [`height_dir`](Self::height_dir) (+ `lift` m so it sits just above the coarse
+    /// background globe) and biome-coloured — the foreground LOD the viewer keeps
+    /// centred under the aircraft for crisp close-up terrain. `half` is the patch
+    /// half-width in metres. Pure CPU, so it can be built on a worker thread.
+    pub fn patch_mesh(&self, center: Vec3, half: f32, cells: usize, lift: f32) -> CpuMesh {
+        let center = center.normalize();
+        let (north, east) = tangent_basis(center);
+        let n1 = cells + 1;
+        let mut dirs = Vec::with_capacity(n1 * n1);
+        let mut heights = Vec::with_capacity(n1 * n1);
+        let mut positions = Vec::with_capacity(n1 * n1);
+        for i in 0..n1 {
+            let a = (i as f32 / cells as f32 - 0.5) * 2.0 * half;
+            for j in 0..n1 {
+                let b = (j as f32 / cells as f32 - 0.5) * 2.0 * half;
+                let dir = (center + north * (a / R_PLANET) + east * (b / R_PLANET)).normalize();
+                let h = self.height_dir(dir);
+                dirs.push(dir);
+                heights.push(h);
+                positions.push(dir * (R_PLANET + h + lift));
+            }
+        }
+        let idx = |i: usize, j: usize| i * n1 + j;
+
+        // Smooth normals from grid neighbours, oriented outward (radial fallback
+        // on the patch border where a centred difference isn't available).
+        let mut normals = vec![Vec3::new(0.0, 0.0, 1.0); n1 * n1];
+        for i in 0..n1 {
+            for j in 0..n1 {
+                let up = dirs[idx(i, j)];
+                let nrm = if i == 0 || j == 0 || i == cells || j == cells {
+                    up
+                } else {
+                    let de = positions[idx(i, j + 1)] - positions[idx(i, j - 1)];
+                    let dn = positions[idx(i + 1, j)] - positions[idx(i - 1, j)];
+                    let mut nv = dn.cross(de);
+                    if nv.dot(up) < 0.0 {
+                        nv = -nv;
+                    }
+                    let l = nv.magnitude();
+                    if l > 1e-6 {
+                        nv / l
+                    } else {
+                        up
+                    }
+                };
+                normals[idx(i, j)] = nrm;
+            }
+        }
+
+        let colors: Vec<Srgba> = (0..n1 * n1)
+            .map(|k| {
+                let slope = 1.0 - normals[k].dot(dirs[k]).clamp(0.0, 1.0);
+                self.biome_color(dirs[k], heights[k], slope)
+            })
+            .collect();
+
+        // Two triangles per quad. The patch material is double-sided (Cull::None),
+        // so winding need not match the globe's; lighting uses the outward normals.
+        let mut indices = Vec::with_capacity(cells * cells * 6);
+        for i in 0..cells {
+            for j in 0..cells {
+                let v00 = idx(i, j) as u32;
+                let v01 = idx(i, j + 1) as u32;
+                let v10 = idx(i + 1, j) as u32;
+                let v11 = idx(i + 1, j + 1) as u32;
+                indices.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
+            }
+        }
+
+        CpuMesh {
+            positions: Positions::F32(positions),
+            indices: Indices::U32(indices),
+            normals: Some(normals),
+            colors: Some(colors),
+            ..Default::default()
+        }
+    }
 }
 
 // --- 3D-domain noise for the sphere (seeded methods) ---------------------

@@ -45,11 +45,20 @@ use three_d::*;
 /// Procedural-terrain seed (fixed so the map is the same every run).
 const TERRAIN_SEED: u32 = 0x5EED_1234;
 
-/// Latitude bands of the globe mesh (× 2 longitudes). 640 → ~31 m cells near
-/// home, ~1.6 M triangles — built once at start-up (a denser mesh resolves the
-/// mountain ranges and coastlines). The one knob to dial back if the globe ever
-/// costs too much GPU or makes start-up mesh generation too slow.
-const GLOBE_BANDS: usize = 640;
+/// Latitude bands of the **background** globe mesh (× 2 longitudes). The crisp
+/// foreground is the LOD follow-patch (see `PATCH_*`), so the globe only has to
+/// carry the mid-distance, horizon and far hemisphere — 480 → ~42 m cells, built
+/// once at start-up. Dial back if the globe ever costs too much GPU.
+const GLOBE_BANDS: usize = 480;
+
+/// Foreground LOD patch: a high-resolution local terrain grid the viewer keeps
+/// centred under the aircraft, over the coarser globe. Half-width in metres,
+/// vertices per side, the radial lift (m) that keeps it above the globe so it
+/// wins the depth test, and how far the aircraft may stray before a rebuild.
+const PATCH_HALF: f32 = 3000.0;
+const PATCH_CELLS: usize = 512; // ~12 m cells
+const PATCH_LIFT: f32 = 6.0;
+const PATCH_REBUILD_M: f32 = 1000.0;
 
 /// Clearance \[m\] below which the aircraft is considered to have hit the terrain.
 const CRASH_MARGIN: f32 = 3.0;
@@ -820,6 +829,23 @@ fn main() {
         terrain.material(&context),
     );
 
+    // Foreground LOD: a high-res terrain patch kept centred under the aircraft,
+    // drawn over the coarse globe. It is double-sided (its tangent-grid winding
+    // need not match the globe's) and regenerated on a worker thread as the
+    // aircraft travels, so the heavy mesh build never hitches the frame.
+    let mut patch_center = vec3(1.0, 0.0, 0.0); // home direction (lat/lon 0, PCI +x)
+    let mut patch_mat = terrain.material(&context);
+    patch_mat.render_states.cull = Cull::None;
+    let mut patch = Gm::new(
+        Mesh::new(
+            &context,
+            &terrain.patch_mesh(patch_center, PATCH_HALF, PATCH_CELLS, PATCH_LIFT),
+        ),
+        patch_mat,
+    );
+    let (patch_tx, patch_rx) = std::sync::mpsc::channel::<CpuMesh>();
+    let mut patch_rebuilding = false;
+
     // Sea: a smooth sphere just below sea level. Land pokes through where the
     // terrain rises above it; deep valleys sit below it and read as water/ocean.
     // The −1 m offset keeps it from coinciding exactly with the terrain surface
@@ -1012,6 +1038,25 @@ fn main() {
         // --- update 3D transforms from the view (PCI render pose) ---
         let (pos, rot) = render_pose(&view);
         let pose = Mat4::from_translation(pos) * rot;
+
+        // Foreground LOD: keep the high-res patch centred under the aircraft. When
+        // it has strayed far enough from the patch centre, kick off a rebuild on a
+        // worker thread (the mesh build is pure CPU); swap the result in when ready.
+        let nadir = pos.normalize();
+        if !patch_rebuilding
+            && nadir.dot(patch_center).clamp(-1.0, 1.0).acos() * r_planet > PATCH_REBUILD_M
+        {
+            patch_center = nadir;
+            patch_rebuilding = true;
+            let (tx, terr, c) = (patch_tx.clone(), terrain, nadir);
+            std::thread::spawn(move || {
+                let _ = tx.send(terr.patch_mesh(c, PATCH_HALF, PATCH_CELLS, PATCH_LIFT));
+            });
+        }
+        if let Ok(mesh) = patch_rx.try_recv() {
+            patch.geometry = Mesh::new(&context, &mesh);
+            patch_rebuilding = false;
+        }
 
         // Terrain collision: the sim has no terrain, so the viewer (which does)
         // flags impact. If the aircraft is at or below the ground at its position,
@@ -1296,7 +1341,9 @@ fn main() {
         }
 
         // --- render scene then GUI on top ---
-        let mut objects: Vec<&dyn Object> = vec![&sea, &ground, &trail];
+        // `patch` (foreground LOD) draws after `ground` so its lifted, finer mesh
+        // overdraws the coarse globe in the near field.
+        let mut objects: Vec<&dyn Object> = vec![&sea, &ground, &patch, &trail];
         match view.kind {
             AircraftKind::Quad => {
                 objects.push(&body);
