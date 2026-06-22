@@ -497,15 +497,17 @@ impl Terrain {
         // — otherwise the mostly-low continents would crush every range flat.
         let on_land = smoothstep(self.sea_level, self.sea_level + 55.0, base);
 
-        // Mountain ranges: a stretched low-frequency mask (where ranges live) ×
-        // a stretched ridged multifractal (the ridge crests). Both fields are
-        // remapped to span [0,1] so peaks actually reach PEAK_HEIGHT.
-        let mask = smoothstep(0.50, 0.66, self.fbm3_at(pw, 1.0 / (bw * 1.7), 4, 200.0));
-        let ridges = smoothstep(0.22, 0.80, self.ridge3_at(pw, 1.0 / (bw * 0.5), 4));
+        // Mountain ranges: a broad low-frequency mask (where ranges live) × a
+        // broad ridged multifractal (the ridge crests). Both are kept LOW frequency
+        // and only mildly contrasted so ranges read as wide massifs, not the thin
+        // vertical needles an over-stretched high-frequency field produces.
+        let mask = smoothstep(0.46, 0.70, self.fbm3_at(pw, 1.0 / (bw * 2.0), 3, 200.0));
+        let ridges = self.ridge3_at(pw, 1.0 / (bw * 1.6), 4).powf(1.25);
         let mountains = mask * ridges * (PEAK_HEIGHT - PLAINS_HEIGHT) * on_land;
 
-        // Fine relief (hills/erosion), on land — adds rolling texture to the plains.
-        let detail = (self.fbm3_at(p, 1.0 / (bw * 0.25), 3, 400.0) - 0.5) * 110.0 * on_land;
+        // Fine relief (hills/erosion), on land — gentle rolling texture, broad
+        // enough not to alias against the mesh cells.
+        let detail = (self.fbm3_at(p, 1.0 / (bw * 0.4), 3, 400.0) - 0.5) * 70.0 * on_land;
 
         let h = (base + mountains + detail).clamp(-self.valley_depth, PEAK_HEIGHT);
 
@@ -893,8 +895,9 @@ const SEA_FRACTION: f32 = 0.56;
 const PLAINS_HEIGHT: f32 = 200.0;
 
 /// Highest mountain peaks (m above the datum) — where the range mask and ridged
-/// noise both saturate. Far above the plains so peaks cross the snow line.
-const PEAK_HEIGHT: f32 = 1500.0;
+/// noise both saturate. Above the plains and the snow line, but kept modest so
+/// ranges read as broad massifs and stay clear of the aircraft's cruise band.
+const PEAK_HEIGHT: f32 = 820.0;
 
 /// The home surface direction (PCI `+x`, lat/lon = 0): centre of the flat
 /// clearing and the anchor for both airframes.
