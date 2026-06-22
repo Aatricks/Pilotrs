@@ -87,13 +87,14 @@ pub fn gravity_magnitude(alt: Real) -> Real {
 pub const RHO0: Real = 1.2682;
 
 /// Atmosphere scale height `H` \[m\]: air density falls as `exp(−alt/H)`, halving
-/// every `H·ln2 ≈ 485 m`. Deliberately *compressed* for this 1/1000-scale planet
-/// so the flight envelope bites within the ~100–400 m band the aircraft actually
-/// fly in — real Earth's ~8.5 km scale height would change density only a percent
-/// or two over that range and be invisible. The model is a fictional thin shell,
-/// not Earth's troposphere; it is the air-density analogue of the radial
-/// inverse-square gravity above.
-pub const ATMOSPHERE_SCALE_HEIGHT: Real = 700.0;
+/// every `H·ln2 ≈ 1.73 km`. Deliberately *compressed* for this 1/1000-scale planet
+/// so the flight envelope is visible (a service ceiling, a stall speed that climbs
+/// with altitude) — real Earth's ~8.5 km scale height would be invisible over the
+/// altitudes flown here. Sized so the air stays flyable across the 0–2 km band the
+/// aircraft now operate in over the mountain ranges (≈78% density at 1.5 km) rather
+/// than collapsing to a few percent. A fictional thin shell, not Earth's
+/// troposphere; the air-density analogue of the radial inverse-square gravity.
+pub const ATMOSPHERE_SCALE_HEIGHT: Real = 2500.0;
 
 /// Air density at altitude `alt` \[m\]: an exponential atmosphere
 /// `ρ = ρ₀·exp(−alt/H)`. Monotone-decreasing, always positive, `= ρ₀` at the
