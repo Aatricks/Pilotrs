@@ -630,9 +630,12 @@ impl Terrain {
             self.value_noise_3d(mp.x * 0.012 + 3.0, mp.y * 0.012 + 7.0, mp.z * 0.012 + 11.0);
         ground = scale_rgb(ground, 0.93 + 0.14 * mottle);
 
-        // Snow line: lower where colder; caps peaks and cold high ground.
+        // Snow line: lower where colder; caps peaks and cold high ground. Snow
+        // doesn't cling to cliffs, so fade it out on steep faces (leaving bare
+        // rock) — otherwise it streaks vertically down the mountainsides.
         let snowline = lerp(420.0, 1080.0, temp);
-        let snowy = smoothstep(snowline - 130.0, snowline + 40.0, elev);
+        let snowy = smoothstep(snowline - 130.0, snowline + 40.0, elev)
+            * (1.0 - smoothstep(0.34, 0.62, slope) * 0.85);
         ground = mix_rgb(ground, snow, snowy.max(polar));
 
         ground
