@@ -399,6 +399,104 @@ fn mat_pbr(
     )
 }
 
+/// One sRGB display channel → linear light, for sky colours that the shader's
+/// colour-mapping re-encodes to display space (matching the scene's pipeline).
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// An sRGB display colour as a linear-light `Vec3` uniform.
+fn lin3(r: f32, g: f32, b: f32) -> Vec3 {
+    vec3(srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b))
+}
+
+/// The sky fragment shader (appended after three-d's tone- and colour-mapping
+/// chunks). Reconstructs each pixel's world ray from the inverse view-projection,
+/// shades a zenith→horizon gradient keyed to the aircraft's local up (correct
+/// anywhere on the globe) with a hazy below-horizon band, and adds a warm sun
+/// glow + disc. Ends with the same tone/colour mapping the scene uses.
+const SKY_FRAG: &str = "
+uniform mat4 viewProjectionInverse;
+uniform vec3 eyePosition;
+uniform vec3 localUp;
+uniform vec3 sunDir;
+uniform vec3 zenithColor;
+uniform vec3 horizonColor;
+uniform vec3 groundColor;
+uniform vec3 sunColor;
+in vec2 uvs;
+layout (location = 0) out vec4 outColor;
+void main() {
+    vec4 p = viewProjectionInverse * vec4(uvs * 2.0 - 1.0, 1.0, 1.0);
+    vec3 dir = normalize(p.xyz / p.w - eyePosition);
+    float up = dot(dir, localUp);
+    vec3 sky = mix(horizonColor, zenithColor, pow(clamp(up, 0.0, 1.0), 0.55));
+    sky = mix(sky, groundColor, clamp(-up * 3.0, 0.0, 1.0));
+    float s = max(dot(dir, sunDir), 0.0);
+    float glow = 0.30 * pow(s, 6.0) + 0.6 * pow(s, 64.0);
+    float disc = smoothstep(0.9975, 0.9991, s);
+    float aboveHorizon = clamp(up * 8.0 + 0.12, 0.0, 1.0);
+    sky += sunColor * (glow + disc * 4.0) * aboveHorizon;
+    // No tone mapping: the sky is artistic LDR, so skip the scene's ACES curve
+    // (which would wash the blue grey) and just encode to the display space.
+    outColor = vec4(color_mapping(sky), 1.0);
+}
+";
+
+/// A procedural sky drawn as a full-screen pass *before* the scene (depth-test
+/// always, colour-only, so the cleared far depth stays 1.0 and the scene draws on
+/// top — and a later fog pass treats the sky as background). The gradient follows
+/// `local_up` so it is correct anywhere on the globe; the sun is world-fixed.
+struct SkyMaterial {
+    local_up: Vec3,
+    sun_dir: Vec3,
+    zenith: Vec3,
+    horizon: Vec3,
+    ground: Vec3,
+    sun: Vec3,
+}
+
+impl Material for SkyMaterial {
+    fn fragment_shader_source(&self, _lights: &[&dyn Light]) -> String {
+        format!("{}\n{}", ColorMapping::fragment_shader_source(), SKY_FRAG)
+    }
+
+    fn id(&self) -> EffectMaterialId {
+        // A stable id in the public/custom range (0x0000–0x4FFF) so three-d caches
+        // this program separately from its built-in materials.
+        EffectMaterialId(0x0042)
+    }
+
+    fn use_uniforms(&self, program: &Program, viewer: &dyn Viewer, _lights: &[&dyn Light]) {
+        viewer.color_mapping().use_uniforms(program);
+        let vp_inv = (viewer.projection() * viewer.view()).invert().unwrap();
+        program.use_uniform("viewProjectionInverse", vp_inv);
+        program.use_uniform("eyePosition", viewer.position());
+        program.use_uniform("localUp", self.local_up);
+        program.use_uniform("sunDir", self.sun_dir);
+        program.use_uniform("zenithColor", self.zenith);
+        program.use_uniform("horizonColor", self.horizon);
+        program.use_uniform("groundColor", self.ground);
+        program.use_uniform("sunColor", self.sun);
+    }
+
+    fn render_states(&self) -> RenderStates {
+        RenderStates {
+            depth_test: DepthTest::Always,
+            write_mask: WriteMask::COLOR,
+            ..Default::default()
+        }
+    }
+
+    fn material_type(&self) -> MaterialType {
+        MaterialType::Opaque
+    }
+}
+
 /// Adapter so the minimap can sample the real [`Terrain`] without depending on
 /// its concrete type. The minimap is a *local tangent map* at home, so a North/
 /// East offset maps to a direction on the globe ([`ne_to_dir`]) and we sample the
@@ -698,7 +796,20 @@ fn main() {
     // Sun: lights the home hemisphere (+x) from the upper side. On the globe a
     // surface's outward normal is its radial; this direction (L = −dir) has a
     // positive component along the home radial so the airfield is lit.
-    let directional = DirectionalLight::new(&context, 2.8, Srgba::WHITE, vec3(-0.7, -0.35, -0.55));
+    let sun_light_dir = vec3(-0.7_f32, -0.35, -0.55);
+    let directional = DirectionalLight::new(&context, 2.8, Srgba::WHITE, sun_light_dir);
+
+    // Procedural sky, drawn full-screen before the scene. The sun sits opposite
+    // the light's travel direction; `local_up` is refreshed per frame so the
+    // gradient stays correct as the aircraft circles the globe.
+    let mut sky = SkyMaterial {
+        local_up: vec3(1.0, 0.0, 0.0),
+        sun_dir: -sun_light_dir.normalize(),
+        zenith: lin3(0.12, 0.34, 0.86),  // vivid blue overhead
+        horizon: lin3(0.68, 0.80, 0.92), // warm pale haze at the rim
+        ground: lin3(0.56, 0.62, 0.68),  // soft band below the horizon
+        sun: lin3(1.0, 0.96, 0.85),      // warm white sun
+    };
 
     // The planet: the procedural terrain baked onto a globe (built once; lit
     // per-vertex colours), centred at the PCI origin.
@@ -1199,9 +1310,13 @@ fn main() {
             }
         }
         objects.push(&clouds);
+        // Sky gradient follows the aircraft's local radial (so the zenith is always
+        // overhead wherever we are on the globe).
+        sky.local_up = pos.normalize();
         frame_input
             .screen()
             .clear(ClearState::color_and_depth(0.55, 0.70, 0.85, 1.0, 1.0))
+            .apply_screen_material(&sky, &camera, &[])
             .render(&camera, objects, &[&ambient, &directional])
             .write(|| gui.render())
             .unwrap();
