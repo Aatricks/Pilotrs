@@ -67,6 +67,10 @@ pub struct FixedWingParams {
     pub cm_alpha: Real,
     pub cm_q: Real,
     pub cm_de: Real,
+    /// Pitch-break magnitude \[—\]: a stall-gated nose-down increment to `Cm`,
+    /// blended in by `σ(α)`. Negative ⇒ nose-down (the textbook break a
+    /// straight-wing airframe shows as the flow separates). Dormant below stall.
+    pub cm_stall: Real,
 
     // Lateral coefficients.
     pub cy0: Real,
@@ -129,6 +133,7 @@ impl FixedWingParams {
             cm_alpha: -0.38,
             cm_q: -3.6,
             cm_de: -0.5,
+            cm_stall: -0.20,
             cy0: 0.0,
             cy_beta: -0.98,
             cy_p: 0.0,
@@ -228,7 +233,15 @@ pub fn fixedwing_wrench(
         + cl_lin * cl_lin / (core::f64::consts::PI * p.e_osw * p.ar)
         + p.cd_q * cf * qq
         + p.cd_de * c.elevator;
-    let cm = p.cm0 + p.cm_alpha * alpha + p.cm_q * cf * qq + p.cm_de * c.elevator;
+    // Pitch break: past the stall angle the moment breaks nose-down (toward
+    // reducing |α|). `σ` gates it on at stall; `signum(α)` makes it restoring on
+    // both the upright and inverted stall — and since `σ ≈ 0` below stall, the
+    // discontinuity at α = 0 is multiplied away, so this is dormant in cruise.
+    let cm = p.cm0
+        + p.cm_alpha * alpha
+        + p.cm_q * cf * qq
+        + p.cm_de * c.elevator
+        + sigma * p.cm_stall * Float::signum(alpha);
 
     // --- lateral coefficients ---
     let cy = p.cy0
@@ -591,6 +604,45 @@ mod tests {
         );
         // σ monotone in the relevant range.
         assert!(p.sigma(0.0) < 0.1 && p.sigma(p.alpha_stall) > 0.4 && p.sigma(1.0) > 0.9);
+    }
+
+    // --- T-PitchBreak: Cm tracks the linear law below stall, then breaks
+    // nose-down past it (the stall pitch break). ---
+    #[test]
+    fn pitch_moment_breaks_nose_down() {
+        let p = aero();
+        // Recover Cm from the body pitching moment at airspeed 25, zero rates and
+        // surfaces, so only the static + break terms remain.
+        let cm = |alpha: Real| {
+            let mut s = State13::at_rest();
+            s.velocity = Vec3::new(25.0 * Float::cos(alpha), 0.0, 25.0 * Float::sin(alpha));
+            s.attitude = UnitQuaternion::identity();
+            let wr = fixedwing_wrench(
+                &s,
+                &p,
+                &FixedWingControls::zero(),
+                Vec3::zeros(),
+                gravity_world(),
+            );
+            let qbar = 0.5 * p.rho * 25.0 * 25.0;
+            wr.moment_body.y / (qbar * p.s * p.c)
+        };
+        // Below stall the break is dormant: Cm matches the linear cm0 + cm_α·α.
+        let a_lin = 0.1;
+        let cm_linear = p.cm0 + p.cm_alpha * a_lin;
+        assert!(
+            (cm(a_lin) - cm_linear).abs() < 1e-3,
+            "Cm should be linear below stall: {} vs {cm_linear}",
+            cm(a_lin)
+        );
+        // Past stall it breaks *below* the linear extrapolation (nose-down).
+        let a_post = p.alpha_stall + 0.2;
+        let cm_linear_post = p.cm0 + p.cm_alpha * a_post;
+        assert!(
+            cm(a_post) < cm_linear_post - 0.05,
+            "Cm should break nose-down past stall: {} vs linear {cm_linear_post}",
+            cm(a_post)
+        );
     }
 
     // --- T-Thrust ---
