@@ -93,7 +93,14 @@ impl FwSimConfig {
     /// on the sphere at `alt`, and deriving the fly-by-wire trim references (and
     /// gain-schedule reference speed) from the same trim. `manual` selects whether
     /// the sim starts piloted (FCS on).
-    fn from_trim(params: FixedWingParams, alt: Real, manual: bool, cruise: Real) -> Self {
+    fn from_trim(mut params: FixedWingParams, alt: Real, manual: bool, cruise: Real) -> Self {
+        // Solve trim (and reference the fly-by-wire gains) at the *spawn* air
+        // density, not sea level: with the compressed atmosphere the fighter's
+        // 300 m spawn sits at ~0.65 ρ₀, so a sea-level trim would leave it badly
+        // under-lifted the instant it appears. As the aircraft then climbs or
+        // descends the live density varies around this reference, and the FBW
+        // schedule self-adjusts through its existing dynamic-pressure ratio.
+        params.rho = planet::density_at(alt);
         let tr = trim(&params, cruise, 0.0).expect("level trim converges");
         let mut autopilot = FixedWingConfig::aerosonde();
         autopilot.trim_throttle = tr.controls.throttle;
@@ -320,9 +327,13 @@ impl FwSim {
     /// aero + thrust, divided by standard gravity. ~1 in level cruise, higher in
     /// a hard pull. Excludes gravity (the wrench is evaluated with `g = 0`).
     pub fn load_factor(&self) -> Real {
+        // Evaluate the aero at the current altitude's air density so the readout
+        // reflects the real dynamic pressure (thinner air aloft ⇒ less lift per α).
+        let mut p = self.params;
+        p.rho = planet::density_at(self.altitude());
         let w = fixedwing_wrench(
             &self.truth,
-            &self.params,
+            &p,
             &self.controls,
             Vec3::zeros(),
             Vec3::zeros(),
@@ -420,6 +431,12 @@ impl FwSim {
     pub fn altitude(&self) -> Real {
         planet::altitude_of(self.truth.position)
     }
+
+    /// Local air density \[kg/m³\] at the current altitude — the same exponential
+    /// atmosphere the aero integrates against. Thins with height.
+    pub fn air_density(&self) -> Real {
+        planet::density_at(self.altitude())
+    }
     /// Course over ground χ \[rad\] in the **local** NED frame at the current
     /// position (`atan2(v_east, v_north)`).
     pub fn course(&self) -> Real {
@@ -488,12 +505,18 @@ impl FwSim {
         self.truth = Rk4.step(
             &self.truth,
             |x| {
+                // Air density thins with altitude (same per-position pattern as the
+                // radial gravity beside it): override the fixed `rho` from the
+                // sub-step's altitude. `FixedWingParams` is `Copy`, so this is a
+                // cheap stack copy, not an allocation.
+                let mut px = p;
+                px.rho = planet::density_at(planet::altitude_of(x.position));
                 rigid_body_deriv(
                     x,
-                    &fixedwing_wrench(x, &p, &c, wind_world, planet::gravity_at(x.position)),
-                    p.mass,
-                    &p.inertia,
-                    &p.inertia_inv,
+                    &fixedwing_wrench(x, &px, &c, wind_world, planet::gravity_at(x.position)),
+                    px.mass,
+                    &px.inertia,
+                    &px.inertia_inv,
                 )
             },
             self.dt,

@@ -46,6 +46,9 @@ pub struct ViewSnapshot {
     pub alpha: Real,
     /// Aerodynamic load factor \[g\] (fixed-wing; 0 for quad).
     pub load_factor: Real,
+    /// Local air density \[kg/m³\] (fixed-wing; sea-level ρ₀ for the quad, which
+    /// flies low and has no altitude-density model).
+    pub density: Real,
     /// Steady wind speed \[m/s\] (fixed-wing; 0 for quad).
     pub wind_speed: Real,
     /// Instantaneous turbulence gust magnitude \[m/s\] (fixed-wing; 0 for quad).
@@ -73,6 +76,7 @@ impl ViewSnapshot {
             fbw_on: false,
             alpha: 0.0,
             load_factor: 0.0,
+            density: fsim_sim::planet::RHO0,
             wind_speed: s.wind_speed,
             gust: s.gust,
             storm: s.storm,
@@ -95,6 +99,7 @@ impl ViewSnapshot {
             fbw_on: s.fbw_on,
             alpha: s.alpha,
             load_factor: s.load_factor,
+            density: s.density,
             wind_speed: s.wind_speed,
             gust: s.gust,
             storm: s.storm,

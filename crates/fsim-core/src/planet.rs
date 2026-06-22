@@ -82,6 +82,28 @@ pub fn gravity_magnitude(alt: Real) -> Real {
     PLANET_MU / (r * r)
 }
 
+/// Sea-level air density \[kg/m³\] — the reference `ρ₀` for [`density_at`]
+/// (matches the Aerosonde's historical fixed value).
+pub const RHO0: Real = 1.2682;
+
+/// Atmosphere scale height `H` \[m\]: air density falls as `exp(−alt/H)`, halving
+/// every `H·ln2 ≈ 485 m`. Deliberately *compressed* for this 1/1000-scale planet
+/// so the flight envelope bites within the ~100–400 m band the aircraft actually
+/// fly in — real Earth's ~8.5 km scale height would change density only a percent
+/// or two over that range and be invisible. The model is a fictional thin shell,
+/// not Earth's troposphere; it is the air-density analogue of the radial
+/// inverse-square gravity above.
+pub const ATMOSPHERE_SCALE_HEIGHT: Real = 700.0;
+
+/// Air density at altitude `alt` \[m\]: an exponential atmosphere
+/// `ρ = ρ₀·exp(−alt/H)`. Monotone-decreasing, always positive, `= ρ₀` at the
+/// surface. Both lift and propeller thrust scale with this, so it gives a stall
+/// speed that climbs with altitude *and* a service ceiling for free.
+#[inline]
+pub fn density_at(alt: Real) -> Real {
+    RHO0 * Float::exp(-alt / ATMOSPHERE_SCALE_HEIGHT)
+}
+
 /// The local NED basis `(north, east, down)` at PCI position `p`, as unit PCI
 /// vectors. `down = −p̂`; `north` is the polar axis (PCI `+z`) projected into the
 /// local tangent plane (pointing toward the North pole); `east = down × north`.
@@ -216,6 +238,23 @@ mod tests {
         // Inverse square: double the radius → quarter the magnitude.
         let g2 = gravity_at(p * 2.0);
         assert!((g.norm() / g2.norm() - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn density_falls_exponentially_with_altitude() {
+        // Surface density is exactly the reference.
+        assert!((density_at(0.0) - RHO0).abs() < 1e-12);
+        // Strictly monotone-decreasing with altitude, always positive.
+        let (mut prev, mut a) = (density_at(0.0), 0.0);
+        while a < 2000.0 {
+            a += 50.0;
+            let d = density_at(a);
+            assert!(d > 0.0 && d < prev, "density not decreasing at {a} m: {d}");
+            prev = d;
+        }
+        // Halves every H·ln2 ≈ 485 m.
+        let half_height = ATMOSPHERE_SCALE_HEIGHT * core::f64::consts::LN_2;
+        assert!((density_at(half_height) - RHO0 / 2.0).abs() < 1e-9);
     }
 
     #[test]

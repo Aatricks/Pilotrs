@@ -1349,6 +1349,7 @@ fn hud_overlay(ctx: &egui::Context, view: &ViewSnapshot, has_gamepad: bool) {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.monospace(format!("airspeed {speed:6.1} m/s"));
                 ui.monospace(format!("altitude {:6.1} m", view.altitude()));
+                ui.monospace(format!("density  {:6.3} kg/m3", view.density));
                 ui.monospace(format!("AoA      {:6.1} deg", view.alpha.to_degrees()));
                 ui.monospace(format!("load     {:6.2} g", view.load_factor));
                 ui.monospace(format!("pitch    {:6.1} deg", pitch.to_degrees()));

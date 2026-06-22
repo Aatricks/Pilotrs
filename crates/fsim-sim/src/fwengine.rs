@@ -36,6 +36,10 @@ pub struct FwSnapshot {
     pub waypoint_index: Option<usize>,
     pub airspeed: Real,
     pub altitude: Real,
+    /// Local air density \[kg/m³\] at the current altitude (for the HUD): thins
+    /// with height, so the envelope (rising stall speed, lapsing thrust) is
+    /// visible as a number even though it's felt through the aero.
+    pub density: Real,
     pub course: Real,
     /// Angle of attack \[rad\] (for the HUD).
     pub alpha: Real,
@@ -72,6 +76,7 @@ impl FwSnapshot {
             waypoint_index: sim.waypoint_index(),
             airspeed: sim.airspeed(),
             altitude: sim.altitude(),
+            density: sim.air_density(),
             course: sim.course(),
             alpha: sim.alpha(),
             load_factor: sim.load_factor(),
