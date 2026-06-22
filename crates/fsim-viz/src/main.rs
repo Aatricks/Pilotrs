@@ -1058,8 +1058,12 @@ fn main() {
         color: vec3(0.70, 0.80, 0.90),
         density: 2.6e-4,
     };
+    let fxaa = FxaaEffect::default();
+    // scene_color/scene_depth: the rendered scene. fog_color: the fogged scene that
+    // FXAA then anti-aliases onto the screen. All recreated on viewport resize.
     let mut scene_color: Option<Texture2D> = None;
     let mut scene_depth: Option<DepthTexture2D> = None;
+    let mut fog_color: Option<Texture2D> = None;
     let mut fb_size = (0u32, 0u32);
 
     window.render_loop(move |mut frame_input| {
@@ -1487,24 +1491,50 @@ fn main() {
                 Wrapping::ClampToEdge,
                 Wrapping::ClampToEdge,
             ));
+            fog_color = Some(Texture2D::new_empty::<[u8; 4]>(
+                &context,
+                vp.width.max(1),
+                vp.height.max(1),
+                Interpolation::Linear,
+                Interpolation::Linear,
+                None,
+                Wrapping::ClampToEdge,
+                Wrapping::ClampToEdge,
+            ));
         }
         let color = scene_color.as_ref().unwrap();
         let depth = scene_depth.as_ref().unwrap();
+        let fogged = fog_color.as_ref().unwrap();
 
         // Render the sky + scene into the offscreen target...
         RenderTarget::new(color.as_color_target(None), depth.as_depth_target())
             .clear(ClearState::color_and_depth(0.55, 0.70, 0.85, 1.0, 1.0))
             .apply_screen_material(&sky, &camera, &[])
             .render(&camera, objects, &[&ambient, &directional]);
-        // ...then composite it to the screen through the fog and draw egui on top.
+        // ...apply the depth fog into an intermediate colour target...
+        fogged
+            .as_color_target(None)
+            .write::<std::convert::Infallible>(|| {
+                apply_screen_effect(
+                    &context,
+                    &fog,
+                    &camera,
+                    &[],
+                    Some(ColorTexture::Single(color)),
+                    Some(DepthTexture::Single(depth)),
+                );
+                Ok(())
+            })
+            .unwrap();
+        // ...then FXAA-resolve the fogged scene to the screen and draw egui on top.
         frame_input
             .screen()
             .apply_screen_effect(
-                &fog,
+                &fxaa,
                 &camera,
                 &[],
-                Some(ColorTexture::Single(color)),
-                Some(DepthTexture::Single(depth)),
+                Some(ColorTexture::Single(fogged)),
+                None,
             )
             .write(|| gui.render())
             .unwrap();
