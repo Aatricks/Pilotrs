@@ -231,15 +231,32 @@ fn geo_dir3(lat: f32, lon: f32) -> Vec3 {
 }
 
 /// A globe follow-camera in the aircraft's **local tangent frame** (up = radial),
-/// so it never gimbal-flips as the fixed-wing flies around the planet. Drag
-/// orbits (azimuth/elevation); scroll zooms.
+/// so it never gimbal-flips as the fixed-wing flies around the planet. It is a
+/// *cinematic* chase: the bearing auto-tracks the aircraft's heading so the camera
+/// glides behind the tail, all motion eased with heavy frame-rate-independent
+/// damping. Drag peeks around (the view re-centres behind the tail a couple of
+/// seconds after you let go); scroll zooms.
 struct OrbitCam {
+    // Smoothed state actually used to place the camera this frame.
     az: f32,
     el: f32,
     dist: f32,
+    target: Vec3,
+    // Manual intent: an azimuth offset from the auto tail-chase bearing (decays
+    // back to 0 once idle) plus the user's elevation/zoom targets.
+    az_off: f32,
+    el_tgt: f32,
+    dist_tgt: f32,
+    idle: f32,
+    init: bool,
 }
 
 impl OrbitCam {
+    /// Camera smoothing time-constant (s) — larger = looser / more cinematic.
+    const TAU: f32 = 0.8;
+    /// Seconds the view holds a manual peek before drifting back behind the tail.
+    const RECENTER_DELAY: f32 = 2.0;
+
     /// Local (north, east) tangent basis at the outward radial `up`.
     fn tangent(up: Vec3) -> (Vec3, Vec3) {
         let axis = vec3(0.0, 0.0, 1.0);
@@ -252,17 +269,76 @@ impl OrbitCam {
         (north, up.cross(north))
     }
 
-    /// Re-aim the camera to chase the aircraft at `target` (PCI), with up = local
-    /// radial. The camera sits at azimuth/elevation/distance in the local frame.
-    fn aim(&self, camera: &mut Camera, target: Vec3) {
-        let up = target.normalize();
-        let (north, east) = Self::tangent(up);
-        let (ce, se) = (self.el.cos(), self.el.sin());
-        let dir = north * (ce * self.az.cos()) + east * (ce * self.az.sin()) + up * se;
-        camera.set_view(target + dir * self.dist, target, up);
+    /// Frame-rate-independent exponential approach factor for time-constant `tau`.
+    fn approach(dt: f32, tau: f32) -> f32 {
+        1.0 - (-dt / tau).exp()
     }
 
-    /// Apply drag (orbit) and wheel (zoom) from the frame's events.
+    /// Wrap an angle into (−π, π] so azimuth eases the short way round.
+    fn wrap_pi(a: f32) -> f32 {
+        use std::f32::consts::{PI, TAU};
+        a - TAU * ((a + PI) / TAU).floor()
+    }
+
+    /// Glide the camera to chase the aircraft at `target` (PCI) from behind its
+    /// heading `fwd` (body nose in PCI), keeping up = local radial so the horizon
+    /// stays level through rolls. `speed` (m/s) sets a small forward look-ahead so
+    /// the jet frames slightly back-of-centre. All motion eases with time-constant
+    /// `TAU`; a large jump (respawn / airframe switch) snaps rather than swooping.
+    fn follow(&mut self, camera: &mut Camera, target: Vec3, fwd: Vec3, speed: f32, dt: f32) {
+        let dt = dt.clamp(0.0, 0.1);
+        let up = target.normalize();
+        let (north, east) = Self::tangent(up);
+
+        // Heading bearing from the body nose projected onto the local tangent.
+        let fh = fwd - up * fwd.dot(up);
+        let fhm = fh.magnitude();
+        let heading = if fhm > 1e-4 {
+            fh.dot(east).atan2(fh.dot(north))
+        } else {
+            self.az // nose near-vertical: hold the current bearing
+        };
+        // Sit behind the tail (+π), plus any manual peek offset.
+        let desired_az = heading + std::f32::consts::PI + self.az_off;
+
+        // A touch of forward look-ahead so the jet frames slightly low / back.
+        let lead = if fhm > 1e-4 {
+            fh / fhm * (speed * 1.2).min(160.0)
+        } else {
+            vec3(0.0, 0.0, 0.0)
+        };
+        let desired_target = target + lead;
+
+        let teleport = self.init && (desired_target - self.target).magnitude() > 5000.0;
+        if !self.init || teleport {
+            self.az = desired_az;
+            self.el = self.el_tgt;
+            self.dist = self.dist_tgt;
+            self.target = desired_target;
+            self.init = true;
+        } else {
+            let a = Self::approach(dt, Self::TAU);
+            self.az += Self::wrap_pi(desired_az - self.az) * a;
+            self.el += (self.el_tgt - self.el) * a;
+            self.dist += (self.dist_tgt - self.dist) * a;
+            self.target += (desired_target - self.target) * a;
+        }
+
+        // Re-centre the manual peek a couple of seconds after the last drag.
+        self.idle += dt;
+        if self.idle > Self::RECENTER_DELAY {
+            self.az_off *= (-dt / Self::TAU).exp();
+        }
+
+        // Place the camera in the smoothed local frame.
+        let cu = self.target.normalize();
+        let (n, e) = Self::tangent(cu);
+        let (ce, se) = (self.el.cos(), self.el.sin());
+        let dir = n * (ce * self.az.cos()) + e * (ce * self.az.sin()) + cu * se;
+        camera.set_view(self.target + dir * self.dist, self.target, cu);
+    }
+
+    /// Apply drag (peek) and wheel (zoom) from the frame's events.
     fn handle(&mut self, events: &[Event]) {
         for ev in events {
             match ev {
@@ -272,15 +348,16 @@ impl OrbitCam {
                     handled: false,
                     ..
                 } => {
-                    self.az -= delta.0 * 0.006;
-                    self.el = (self.el + delta.1 * 0.006).clamp(-1.3, 1.45);
+                    self.az_off -= delta.0 * 0.006;
+                    self.el_tgt = (self.el_tgt + delta.1 * 0.006).clamp(-1.3, 1.45);
+                    self.idle = 0.0;
                 }
                 Event::MouseWheel {
                     delta,
                     handled: false,
                     ..
                 } => {
-                    self.dist = (self.dist * (1.0 - delta.1 * 0.0015)).clamp(40.0, 14000.0);
+                    self.dist_tgt = (self.dist_tgt * (1.0 - delta.1 * 0.0015)).clamp(40.0, 14000.0);
                 }
                 _ => {}
             }
@@ -537,9 +614,17 @@ fn main() {
         30000.0,
     );
     let mut orbit = OrbitCam {
-        az: std::f32::consts::PI, // behind the aircraft, looking North
-        el: 0.5,                  // ~29° above the local horizon
-        dist: 1400.0,
+        // Snapped to the aircraft heading on the first frame (see `follow`); these
+        // are just the manual elevation/zoom intent the chase eases toward.
+        az: std::f32::consts::PI,
+        el: 0.42,
+        dist: 1100.0,
+        target: vec3(r_planet, 0.0, 0.0),
+        az_off: 0.0,
+        el_tgt: 0.42, // ~24° above the local horizon
+        dist_tgt: 1100.0,
+        idle: 0.0,
+        init: false,
     };
 
     let ambient = AmbientLight::new(&context, 0.4, Srgba::WHITE);
@@ -872,14 +957,17 @@ fn main() {
             },
         );
 
-        // Globe follow-cam: orbit the aircraft in its local tangent frame (up =
-        // radial) so the camera never gimbal-flips as the fixed-wing circles the
-        // planet. Drag orbits / scroll zooms — but only when egui isn't using the
+        // Globe follow-cam: a cinematic chase in the aircraft's local tangent frame
+        // (up = radial) so it never gimbal-flips as the fixed-wing circles the
+        // planet. The bearing auto-tracks the body nose so the camera glides behind
+        // the tail. Drag peeks / scroll zooms — but only when egui isn't using the
         // pointer, so dragging on the minimap never moves the camera.
         if !egui_using {
             orbit.handle(&frame_input.events);
         }
-        orbit.aim(&mut camera, pos);
+        let fwd = rot.x.truncate(); // body nose (+x FRD) in PCI
+        let speed = to_v(&view.velocity).magnitude();
+        orbit.follow(&mut camera, pos, fwd, speed, dt_frame as f32);
 
         // --- apply UI actions ---
         if ui.recording != prev_recording {

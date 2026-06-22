@@ -10,7 +10,7 @@ A from-scratch **6-degrees-of-freedom flight simulator and autopilot**, written 
 <p align="center">
   <img src="docs/screenshot.png" alt="Pilotrs — hand-flying the fly-by-wire fighter over the 1/1000-scale Earth" width="640">
 </p>
-<p align="center"><em>Hand-flying the relaxed-stability fighter over the globe — flip the flight-control system off (<code>F</code>) and the unstable airframe departs in under a second (about 0.34s which is comparable to an f16's 0.3s divergency rate).</em></p>
+<p align="center"></p>
 
 The defining constraint: **the autopilot never sees ground truth.** It flies on noisy, degraded sensor measurements fused by an onboard estimator.
 
