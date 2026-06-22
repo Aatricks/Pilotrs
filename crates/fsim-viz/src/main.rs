@@ -646,9 +646,11 @@ fn main() {
     // The −1 m offset keeps it from coinciding exactly with the terrain surface
     // at the shoreline (height == sea_level), which would z-fight.
     let sea_radius = r_planet + terrain.sea_level - 1.0;
+    // Glossy ocean: low roughness + a touch of metalness so the sun throws a
+    // bright moving specular glint across the water instead of a flat blue fill.
     let mut sea = Gm::new(
-        Mesh::new(&context, &CpuMesh::sphere(48)),
-        opaque(&context, 30, 78, 130),
+        Mesh::new(&context, &CpuMesh::sphere(64)),
+        mat_pbr(&context, 28, 92, 168, 0.13, 0.25),
     );
     sea.set_transformation(Mat4::from_scale(sea_radius));
 
