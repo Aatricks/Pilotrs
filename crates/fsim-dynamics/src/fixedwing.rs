@@ -82,6 +82,11 @@ pub struct FixedWingParams {
     pub cl0_roll: Real,
     pub cl_beta: Real,
     pub clp: Real,
+    /// Post-stall roll-damping coefficient \[—\]: the value `Clp` is blended
+    /// *toward* past the stall. Positive ⇒ the roll damping reverses into
+    /// **anti-damping** (autorotation): a dropped wing keeps dropping, the
+    /// mechanism of an incipient spin. Below stall `Clp` is used unchanged.
+    pub clp_spin: Real,
     pub clr: Real,
     pub cl_da: Real,
     pub cl_dr: Real,
@@ -143,6 +148,7 @@ impl FixedWingParams {
             cl0_roll: 0.0,
             cl_beta: -0.12,
             clp: -0.26,
+            clp_spin: 0.10,
             clr: 0.14,
             cl_da: 0.08,
             cl_dr: 0.105,
@@ -250,11 +256,19 @@ pub fn fixedwing_wrench(
         + p.cy_r * bf * rr
         + p.cy_da * c.aileron
         + p.cy_dr * c.rudder;
+    // Lateral stall behaviour, both gated by the same `σ`:
+    //  * roll damping reverses into anti-damping past stall (autorotation) — a
+    //    dropped wing keeps dropping, the seed of an incipient spin;
+    //  * aileron authority fades to zero — you cannot pick a stalled wing back up
+    //    with aileron, only by unstalling.
+    // Below stall σ ≈ 0, so both are bit-for-bit the conventional model.
+    let clp_eff = p.clp * (1.0 - sigma) + p.clp_spin * sigma;
+    let cl_da_eff = p.cl_da * (1.0 - sigma);
     let cl_roll = p.cl0_roll
         + p.cl_beta * beta
-        + p.clp * bf * pp
+        + clp_eff * bf * pp
         + p.clr * bf * rr
-        + p.cl_da * c.aileron
+        + cl_da_eff * c.aileron
         + p.cl_dr * c.rudder;
     let cn = p.cn0
         + p.cn_beta * beta
@@ -766,6 +780,119 @@ mod tests {
         assert!(
             deriv(&tr.state, &p, &c).d_angular_rate.z < -1e-4,
             "+rudder -> yaw left"
+        );
+    }
+
+    // --- T-LateralFade: past stall the aileron loses authority and the roll
+    // damping reverses sign (autorotation). Recovered straight from the roll
+    // moment with one lateral input active at a time. ---
+    #[test]
+    fn lateral_authority_fades_and_roll_damping_reverses_past_stall() {
+        let p = aero();
+        // cl_roll recovered from the body roll moment at airspeed 25, with only the
+        // requested roll rate / aileron active (everything else zero).
+        let cl_roll = |alpha: Real, pp: Real, aileron: Real| {
+            let mut s = State13::at_rest();
+            s.velocity = Vec3::new(25.0 * Float::cos(alpha), 0.0, 25.0 * Float::sin(alpha));
+            s.attitude = UnitQuaternion::identity();
+            s.angular_rate = Vec3::new(pp, 0.0, 0.0);
+            let c = FixedWingControls {
+                aileron,
+                ..FixedWingControls::zero()
+            };
+            let wr = fixedwing_wrench(&s, &p, &c, Vec3::zeros(), gravity_world());
+            wr.moment_body.x / (0.5 * p.rho * 25.0 * 25.0 * p.s * p.b)
+        };
+        let bf = p.b / (2.0 * 25.0);
+        // Roll damping: stabilizing (negative) below stall, reversed (positive,
+        // anti-damping) past it.
+        let clp_below = cl_roll(0.05, 1.0, 0.0) / bf;
+        let clp_above = cl_roll(0.8, 1.0, 0.0) / bf;
+        assert!(
+            clp_below < 0.0,
+            "roll damping stable below stall: {clp_below}"
+        );
+        assert!(
+            clp_above > 0.0,
+            "roll damping must reverse (autorotation) past stall: {clp_above}"
+        );
+        // Aileron authority: present below stall, faded ~to nothing past it.
+        let da_below = cl_roll(0.05, 0.0, 0.1) / 0.1;
+        let da_above = cl_roll(0.8, 0.0, 0.1) / 0.1;
+        assert!(
+            da_below > 0.0,
+            "aileron rolls right below stall: {da_below}"
+        );
+        assert!(
+            da_above.abs() < 0.1 * da_below.abs(),
+            "aileron authority must fade past stall: {da_below} -> {da_above}"
+        );
+    }
+
+    // --- T-Spin (mechanism): the roll acceleration shares the sign of the roll
+    // rate past stall (a dropped wing keeps dropping) but opposes it in cruise
+    // (damping). This is the autorotation feedback that seeds an incipient spin,
+    // tested at the derivative so it's free of trajectory confounds. ---
+    #[test]
+    fn roll_self_amplifies_past_stall_but_damps_in_cruise() {
+        let p = aero();
+        let roll_accel = |alpha: Real, pp: Real| {
+            let mut s = State13::at_rest();
+            s.velocity = Vec3::new(25.0 * Float::cos(alpha), 0.0, 25.0 * Float::sin(alpha));
+            s.attitude = UnitQuaternion::identity();
+            s.angular_rate = Vec3::new(pp, 0.0, 0.0);
+            deriv(&s, &p, &FixedWingControls::zero()).d_angular_rate.x
+        };
+        let pp = 0.2;
+        // Cruise: roll damping is restoring (opposes the rate).
+        assert!(roll_accel(0.05, pp) < 0.0, "roll should damp in cruise");
+        // Past stall: the acceleration shares the sign of the rate, either wing.
+        assert!(
+            roll_accel(0.8, pp) > 0.0,
+            "roll should self-amplify past stall"
+        );
+        assert!(
+            roll_accel(0.8, -pp) < 0.0,
+            "...and symmetrically for the other wing"
+        );
+    }
+
+    // --- T-Spin (boundedness): the case where the anti-damped roll could actually
+    // run away is the relaxed fighter — FCS off it pitch-diverges *into* the stall
+    // and departs, holding high α with the reversed roll damping live. That
+    // departure must stay finite and physically bounded at the 1 ms step, never a
+    // numerical blow-up. (The stable Aerosonde instead pitches back out of the
+    // stall almost at once — it is spin-resistant — so it can't exercise this.) ---
+    #[test]
+    fn fighter_departure_past_stall_stays_bounded() {
+        let p = fighter();
+        let tr = trim(&p, 25.0, 0.0).unwrap();
+        let mut s = tr.state;
+        s.angular_rate += Vec3::new(0.1, 0.1, 0.0); // roll + pitch upset
+        let c = tr.controls; // frozen at trim — pure airframe, no control law
+        let rk4 = Rk4;
+        let mut peak = 0.0;
+        let mut reached_stall = false;
+        for _ in 0..4_000 {
+            // 4 s
+            s = rk4.step(&s, |x| deriv(x, &p, &c), 1e-3);
+            assert!(
+                s.angular_rate.iter().all(|v| v.is_finite()),
+                "departure diverged to a non-finite rate"
+            );
+            peak = Float::max(peak, s.angular_rate.norm());
+            let vb = s.attitude.inverse() * s.velocity;
+            if Float::atan2(vb.z, vb.x).abs() > p.alpha_stall {
+                reached_stall = true;
+            }
+        }
+        assert!(
+            reached_stall,
+            "the relaxed fighter should depart past the stall angle"
+        );
+        assert!(
+            peak < 50.0,
+            "the post-stall departure must stay physically bounded: peak {peak}"
         );
     }
 
