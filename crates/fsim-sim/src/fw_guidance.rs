@@ -26,21 +26,26 @@
 //! altitude is the active waypoint's altitude above the surface.
 
 use crate::guidance::Waypoint;
-use core::f64::consts::PI;
+use core::f64::consts::{FRAC_PI_2, PI};
 use fsim_control::FixedWingSetpoint;
 use fsim_core::planet::{altitude_of, gc_course, gc_cross_track, gc_distance, gc_normal};
 use fsim_core::{Real, Vec3};
 
 /// What to do once the *last* waypoint is captured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TerminalAction {
     /// Hold the course/altitude flown into the final waypoint, i.e. fly straight
     /// off the end of the route. Simplest and most robust: no new geometry, no
-    /// risk of an un-capturable turn, the plant just keeps cruising. (Chosen
-    /// default — see the module RISKS for why orbit was *not* the default.) The
-    /// enum exists so an `Orbit { center, radius, dir }` variant can be added
-    /// later without touching the leg logic.
+    /// risk of an un-capturable turn, the plant just keeps cruising. (The
+    /// default — see the module RISKS for why orbit was *not* the default.)
     HoldCourse,
+    /// Loiter: circle the final waypoint at `radius` \[m\] holding its altitude,
+    /// `dir = +1` clockwise / `−1` counter-clockwise (viewed from above). A
+    /// great-circle orbit vector field steers tangent to the circle with a radial
+    /// correction, so the aircraft captures and holds the loiter from any
+    /// approach — the realistic "hold here" behaviour for an autopilot that has
+    /// reached the end of its route.
+    Orbit { radius: Real, dir: Real },
 }
 
 /// Route-guidance tuning.
@@ -89,8 +94,11 @@ pub struct FwGuidance {
     /// leg `i>0` the origin is `waypoints[i-1]`; for `i==0` it is this start.
     start: Vec3,
     cfg: FwGuidanceConfig,
-    /// Latched terminal setpoint, frozen the first gate after the final capture
-    /// so `HoldCourse` flies a fixed course (no further re-aiming jitter).
+    /// True once the final waypoint has been captured (the route is complete).
+    completed: bool,
+    /// Latched `HoldCourse` setpoint, frozen the gate the final waypoint is
+    /// captured so it flies a fixed course (no re-aiming jitter). Unused by
+    /// `Orbit`, which recomputes the loiter setpoint every gate.
     terminal_sp: Option<FixedWingSetpoint>,
 }
 
@@ -104,6 +112,7 @@ impl FwGuidance {
             idx: 0,
             start,
             cfg,
+            completed: false,
             terminal_sp: None,
         }
     }
@@ -122,9 +131,9 @@ impl FwGuidance {
         !self.waypoints.is_empty() && self.idx + 1 >= self.waypoints.len()
     }
 
-    /// True once the final waypoint has been captured and we are holding.
+    /// True once the final waypoint has been captured and we are holding/loitering.
     pub fn is_complete(&self) -> bool {
-        self.terminal_sp.is_some()
+        self.completed
     }
 
     /// Origin (start of the current leg) for the active index.
@@ -177,35 +186,82 @@ impl FwGuidance {
         if gc_distance(pos, active) < self.cfg.accept_radius {
             if self.idx + 1 < self.waypoints.len() {
                 self.idx += 1;
-            } else if self.terminal_sp.is_none() {
-                self.terminal_sp = Some(self.terminal_setpoint(pos));
+            } else if !self.completed {
+                self.completed = true;
+                // HoldCourse freezes a fixed setpoint at the capture point; Orbit
+                // recomputes its loiter every gate, so nothing is latched for it.
+                if let TerminalAction::HoldCourse = self.cfg.terminal {
+                    self.terminal_sp = Some(self.hold_setpoint(pos));
+                }
             }
         }
 
-        // Once a terminal setpoint is latched, keep flying it unchanged.
-        if let Some(sp) = self.terminal_sp {
-            return sp;
+        // Route complete: hold (latched) or loiter (recomputed each gate).
+        if self.completed {
+            return match self.cfg.terminal {
+                TerminalAction::HoldCourse => {
+                    self.terminal_sp.expect("HoldCourse latched on completion")
+                }
+                TerminalAction::Orbit { radius, dir } => self.orbit_setpoint(pos, radius, dir),
+            };
         }
 
         let origin = self.leg_origin();
         let target = self.waypoints[self.idx].position;
         FixedWingSetpoint {
             airspeed: self.cfg.airspeed,
-            altitude: altitude_of(target),
+            altitude: self.leg_altitude(pos, origin, target),
             course: wrap_pi(self.leg_course(pos, origin, target)),
         }
     }
 
-    /// Setpoint to latch when the final waypoint is captured: hold the final-leg
+    /// Commanded altitude along the leg `origin → target`: a linear glide-slope
+    /// from the origin's altitude to the target's by along-track fraction (so a
+    /// climb/descent is flown gradually across the leg instead of stepping the
+    /// moment the leg begins). Fraction is `1 − remaining/leg_length`, clamped.
+    fn leg_altitude(&self, pos: Vec3, origin: Vec3, target: Vec3) -> Real {
+        let origin_alt = altitude_of(origin);
+        let target_alt = altitude_of(target);
+        let leg_len = gc_distance(origin, target);
+        if leg_len < 1.0 {
+            return target_alt;
+        }
+        let f = (1.0 - gc_distance(pos, target) / leg_len).clamp(0.0, 1.0);
+        origin_alt + (target_alt - origin_alt) * f
+    }
+
+    /// `HoldCourse` setpoint, latched at final capture: hold the final-leg
     /// great-circle course (frozen at the capture point) and the last altitude.
-    fn terminal_setpoint(&self, pos: Vec3) -> FixedWingSetpoint {
+    fn hold_setpoint(&self, pos: Vec3) -> FixedWingSetpoint {
         let last = self.waypoints[self.idx].position;
-        match self.cfg.terminal {
-            TerminalAction::HoldCourse => FixedWingSetpoint {
-                airspeed: self.cfg.airspeed,
-                altitude: altitude_of(last),
-                course: wrap_pi(self.leg_course(pos, self.leg_origin(), last)),
-            },
+        FixedWingSetpoint {
+            airspeed: self.cfg.airspeed,
+            altitude: altitude_of(last),
+            course: wrap_pi(self.leg_course(pos, self.leg_origin(), last)),
+        }
+    }
+
+    /// `Orbit` loiter setpoint: a great-circle orbit vector field around the final
+    /// waypoint. With `λ` the bearing **to** the centre, the commanded course is
+    /// the tangent `λ + dir·π/2` corrected by `−dir·atan(k·(d−radius))`: outside
+    /// the circle (`d>radius`) it bends toward the centre, inside it bends away,
+    /// so the aircraft captures and holds the loiter from any approach. Altitude
+    /// is the centre's.
+    fn orbit_setpoint(&self, pos: Vec3, radius: Real, dir: Real) -> FixedWingSetpoint {
+        let center = self.waypoints[self.idx].position;
+        let n = gc_normal(pos, center);
+        let lambda = if n == Vec3::zeros() {
+            0.0
+        } else {
+            gc_course(pos, n) // bearing toward the centre
+        };
+        let d = gc_distance(pos, center);
+        let k = 1.0 / radius.max(1.0);
+        let chi = lambda + dir.signum() * (FRAC_PI_2 - (k * (d - radius)).atan());
+        FixedWingSetpoint {
+            airspeed: self.cfg.airspeed,
+            altitude: altitude_of(center),
+            course: wrap_pi(chi),
         }
     }
 }
@@ -275,6 +331,56 @@ mod tests {
             (a.course - FRAC_PI_2).abs() < 0.05,
             "should hold ~East: {}",
             a.course
+        );
+    }
+
+    // Along-leg altitude interpolation: a climbing leg ramps the commanded
+    // altitude from the origin's to the target's across the leg, not as a step.
+    #[test]
+    fn leg_altitude_ramps_across_the_leg() {
+        use fsim_core::planet::PLANET_RADIUS;
+        let start = Waypoint::geodetic(0.0, 0.0, 100.0).position;
+        let wp = Waypoint::geodetic(2000.0 / PLANET_RADIUS, 0.0, 200.0); // 2 km N, climb 100→200
+        let mut g = FwGuidance::new(vec![wp], start, cfg());
+        // At the start of the leg: near the origin altitude (not the target's).
+        let s0 = g.update(start);
+        assert!((s0.altitude - 100.0).abs() < 5.0, "start ~100: {}", s0.altitude);
+        // Halfway along: about midway in altitude.
+        let mid = Waypoint::geodetic(1000.0 / PLANET_RADIUS, 0.0, 0.0).position;
+        let sm = g.update(mid);
+        assert!((sm.altitude - 150.0).abs() < 12.0, "mid ~150: {}", sm.altitude);
+    }
+
+    // Orbit terminal: after capturing the final waypoint it loiters — holding the
+    // fix's altitude and commanding a course tangent to the circle.
+    #[test]
+    fn orbit_terminal_loiters_tangent() {
+        use fsim_core::planet::PLANET_RADIUS;
+        let cfg = FwGuidanceConfig {
+            terminal: TerminalAction::Orbit {
+                radius: 150.0,
+                dir: 1.0,
+            },
+            ..FwGuidanceConfig::default()
+        };
+        let center = Waypoint::geodetic(500.0 / PLANET_RADIUS, 0.0, 200.0);
+        let start = Waypoint::geodetic(0.0, 0.0, 200.0).position;
+        let mut g = FwGuidance::new(vec![center], start, cfg);
+        g.update(center.position); // capture the final waypoint
+        assert!(g.is_complete());
+        // On the circle, East of the centre: tangent course, centre's altitude.
+        let on = Waypoint::geodetic(500.0 / PLANET_RADIUS, 150.0 / PLANET_RADIUS, 200.0).position;
+        let sp = g.update(on);
+        assert!(
+            (sp.altitude - 200.0).abs() < 1.0,
+            "orbit holds the centre altitude: {}",
+            sp.altitude
+        );
+        let n = gc_normal(on, center.position);
+        let off = wrap_pi(sp.course - gc_course(on, n)).abs();
+        assert!(
+            (off - FRAC_PI_2).abs() < 0.25,
+            "course should be ~tangent (±π/2 off the bearing to centre): {off}"
         );
     }
 

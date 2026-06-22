@@ -57,6 +57,9 @@ pub struct ViewSnapshot {
     pub storm: Real,
     /// A fault is active (for the HUD).
     pub faulted: bool,
+    /// Terrain-avoidance caution: the autopilot is climbing/steering to clear
+    /// terrain or in a GPWS pull-up (fixed-wing autopilot; false for the quad).
+    pub terrain_warn: bool,
     /// The aircraft has crashed into the terrain.
     pub crashed: bool,
 }
@@ -81,6 +84,7 @@ impl ViewSnapshot {
             gust: s.gust,
             storm: s.storm,
             faulted: s.faulted,
+            terrain_warn: false,
             crashed: s.crashed,
         }
     }
@@ -104,6 +108,7 @@ impl ViewSnapshot {
             gust: s.gust,
             storm: s.storm,
             faulted: s.faulted,
+            terrain_warn: s.terrain_warn,
             crashed: s.crashed,
         }
     }

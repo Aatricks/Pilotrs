@@ -11,6 +11,8 @@ use crate::atmosphere::{Atmosphere, AtmosphereConfig, StormCell};
 use crate::faults::FwFaults;
 use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
 use crate::guidance::Waypoint;
+use crate::terrain_avoid::{TerrainAvoid, TerrainAvoidConfig, TerrainHeight};
+use std::sync::Arc;
 use fsim_control::{
     FbwConfig, FixedWingAutopilot, FixedWingConfig, FixedWingController, FixedWingSetpoint,
     FlyByWire,
@@ -47,6 +49,13 @@ pub struct FwSimConfig {
     pub start_manual: bool,
     /// Initial state of the fly-by-wire toggle when `start_manual`.
     pub fbw_enabled: bool,
+    /// Terrain elevation oracle for autopilot terrain avoidance. `None` (the
+    /// default) ⇒ the autopilot is terrain-blind and flies the raw setpoint, so
+    /// the headless flight path is unchanged. The viewer injects the real
+    /// procedural terrain; tests inject an analytic one.
+    pub terrain: Option<Arc<dyn TerrainHeight>>,
+    /// Tuning for the terrain-avoidance layer (only active when `terrain` is set).
+    pub terrain_avoid: TerrainAvoidConfig,
 }
 
 impl FwSimConfig {
@@ -131,6 +140,8 @@ impl FwSimConfig {
             atmosphere: AtmosphereConfig::calm(),
             start_manual: manual,
             fbw_enabled: true,
+            terrain: None,
+            terrain_avoid: TerrainAvoidConfig::default(),
         }
     }
 }
@@ -199,7 +210,17 @@ pub struct FwSim {
     faults: FwFaults,
     /// Crashed into the terrain — the aircraft is wreckage and stops flying.
     crashed: bool,
-    /// Last setpoint actually applied to the autopilot (logged each sample).
+    /// Terrain elevation oracle for avoidance (`None` ⇒ terrain-blind).
+    terrain: Option<Arc<dyn TerrainHeight>>,
+    /// The terrain-avoidance layer (inert unless `terrain` is set).
+    avoid: TerrainAvoid,
+    /// The base setpoint — route- or user-commanded, **before** terrain
+    /// avoidance. The avoidance layer reads it fresh each gate so the route's
+    /// altitude/course reference is never lost (otherwise a terrain climb would
+    /// ratchet the held setpoint up and never come back down).
+    base_setpoint: FixedWingSetpoint,
+    /// The setpoint actually flown (the base after terrain avoidance); this is
+    /// what the autopilot tracks and what is logged / shown on the HUD.
     setpoint: FixedWingSetpoint,
     /// Setpoint-hold / route-follow / manual (selects how `step` builds surfaces).
     mode: FwMode,
@@ -232,6 +253,9 @@ impl FwSim {
             atmosphere: Atmosphere::new(cfg.atmosphere),
             faults: FwFaults::none(),
             crashed: false,
+            terrain: cfg.terrain,
+            avoid: TerrainAvoid::new(cfg.terrain_avoid),
+            base_setpoint: cfg.setpoint,
             setpoint: cfg.setpoint,
             mode,
             controls: FixedWingControls::zero(),
@@ -247,7 +271,9 @@ impl FwSim {
     /// Update the commanded airspeed/altitude/course. Also switches the sim back
     /// to single-setpoint mode, cancelling any active route.
     pub fn set_setpoint(&mut self, sp: FixedWingSetpoint) {
+        self.base_setpoint = sp;
         self.setpoint = sp;
+        self.avoid.reset();
         self.mode = FwMode::Setpoint;
     }
 
@@ -259,7 +285,9 @@ impl FwSim {
         let start = self.truth.position;
         let mut g = FwGuidance::new(waypoints, start, cfg);
         // Prime the setpoint so a log/read before the first gate is sensible.
-        self.setpoint = g.update(self.truth.position);
+        self.base_setpoint = g.update(self.truth.position);
+        self.setpoint = self.base_setpoint;
+        self.avoid.reset();
         self.mode = FwMode::Route(g);
     }
 
@@ -432,6 +460,24 @@ impl FwSim {
         planet::altitude_of(self.truth.position)
     }
 
+    /// Height above ground level \[m\]: altitude minus the terrain elevation
+    /// directly below. With no terrain oracle the ground is the sea-level datum,
+    /// so this equals [`altitude`](Self::altitude).
+    pub fn agl(&self) -> Real {
+        let p = self.truth.position;
+        let ground = match &self.terrain {
+            Some(t) if p.norm() > 1.0 => t.elevation(p.normalize()),
+            _ => 0.0,
+        };
+        planet::altitude_of(p) - ground
+    }
+
+    /// True when the terrain-avoidance layer is actively avoiding terrain
+    /// (climbing, steering, or in a GPWS pull-up) — drives the HUD caution.
+    pub fn terrain_warn(&self) -> bool {
+        self.avoid.warn()
+    }
+
     /// Local air density \[kg/m³\] at the current altitude — the same exponential
     /// atmosphere the aero integrates against. Thins with height.
     pub fn air_density(&self) -> Real {
@@ -465,10 +511,23 @@ impl FwSim {
             let control_dt = self.control_period as Real * self.dt;
             // Truth feedback, rotated into the local horizon (sphere).
             let est = local_est_from_pci(&self.truth);
-            // Route mode: derive the setpoint from truth (perfect feedback) first.
+            // Route mode: derive the base setpoint from truth (perfect feedback).
             if let FwMode::Route(g) = &mut self.mode {
-                self.setpoint = g.update(self.truth.position);
+                self.base_setpoint = g.update(self.truth.position);
             }
+            // Terrain avoidance rewrites the *flown* setpoint from the base route
+            // intent each gate (climb-to-clear, lateral turn-away, GPWS pull-up),
+            // leaving the base reference intact. Skipped in manual flight (the
+            // pilot is in command) and inert when no terrain oracle is injected.
+            let mut flown = self.base_setpoint;
+            if !self.is_manual() {
+                if let Some(t) = self.terrain.clone() {
+                    flown = self
+                        .avoid
+                        .adjust(&self.truth, flown, t.as_ref(), control_dt);
+                }
+            }
+            self.setpoint = flown;
             let commanded = match &mut self.mode {
                 // Pilot-in-the-loop: fly-by-wire (or passthrough) from the stick.
                 FwMode::Manual {
@@ -1254,5 +1313,246 @@ mod tests {
         assert_eq!(frozen.velocity, Vec3::zeros());
         sim.run_headless(2000);
         assert_eq!(*sim.truth(), frozen, "wreckage doesn't move");
+    }
+
+    // --- Terrain avoidance ---
+
+    use crate::terrain_avoid::TerrainHeight;
+    use std::sync::Arc;
+
+    /// A single Gaussian hill on the sphere, centred on PCI direction `center`,
+    /// peaking `peak` m above a `base` plain with angular (arc) width `sigma` m.
+    #[derive(Debug)]
+    struct Hill {
+        center: Vec3,
+        peak: Real,
+        sigma: Real,
+        base: Real,
+    }
+    impl TerrainHeight for Hill {
+        fn elevation(&self, dir: Vec3) -> Real {
+            let c = dir.normalize().dot(&self.center.normalize()).clamp(-1.0, 1.0);
+            let arc = c.acos() * planet::PLANET_RADIUS;
+            self.base + self.peak * (-(arc * arc) / (2.0 * self.sigma * self.sigma)).exp()
+        }
+    }
+
+    fn hill_at(north_m: Real, east_m: Real, peak: Real, sigma: Real) -> Hill {
+        Hill {
+            center: planet::geodetic_to_pci(
+                north_m / planet::PLANET_RADIUS,
+                east_m / planet::PLANET_RADIUS,
+                0.0,
+            ),
+            peak,
+            sigma,
+            base: -5.0,
+        }
+    }
+
+    /// Fly the aerosonde North from `alt` toward `hill` and report the minimum
+    /// height-above-ground reached over `steps` base steps. `lateral` selects
+    /// climb-only vs full avoidance.
+    fn fw_over_hill(alt: Real, airspeed: Real, hill: Hill, lateral: bool) -> FwSim {
+        let mut cfg = FwSimConfig::aerosonde_at(alt);
+        cfg.terrain = Some(Arc::new(hill));
+        cfg.terrain_avoid.lateral = lateral;
+        cfg.setpoint = FixedWingSetpoint {
+            airspeed,
+            altitude: alt,
+            course: 0.0,
+        };
+        FwSim::new(cfg)
+    }
+
+    // A climbable ridge ahead: the autopilot climbs to clear it and never lets the
+    // height-above-ground collapse (climb-only, lateral off to isolate the floor).
+    #[test]
+    fn terrain_avoidance_climbs_over_a_ridge() {
+        let hill = hill_at(1800.0, 0.0, 90.0, 400.0);
+        let mut sim = fw_over_hill(100.0, 25.0, hill, false);
+        let mut min_agl = f64::INFINITY;
+        for _ in 0..150_000 {
+            sim.step();
+            min_agl = min_agl.min(sim.agl());
+        }
+        assert!(
+            min_agl > 40.0,
+            "climb-to-clear should hold clearance over the ridge: min AGL {min_agl}"
+        );
+    }
+
+    // The reported failure: cruising at 300 m straight at a ~430 m peak. It is
+    // climbable, so the autopilot must clear it by climbing (with lateral on, as
+    // shipped) — not erode clearance and fly into it.
+    #[test]
+    fn terrain_avoidance_clears_a_midsize_peak_at_cruise() {
+        let hill = hill_at(2200.0, 0.0, 435.0, 320.0);
+        let mut sim = fw_over_hill(300.0, 25.0, hill, true); // lateral on (as shipped)
+        let mut min_agl = f64::INFINITY;
+        for _ in 0..220_000 {
+            sim.step();
+            min_agl = min_agl.min(sim.agl());
+        }
+        assert!(
+            min_agl > 25.0,
+            "should climb over a climbable ~430 m peak from 300 m cruise: min AGL {min_agl}"
+        );
+    }
+
+    // The clearance is speed-invariant by design (look-ahead and climb rate both
+    // scale with speed): the same ridge is cleared flying faster.
+    #[test]
+    fn terrain_avoidance_holds_clearance_at_higher_speed() {
+        let hill = hill_at(1800.0, 0.0, 90.0, 400.0);
+        let mut sim = fw_over_hill(100.0, 30.0, hill, false);
+        let mut min_agl = f64::INFINITY;
+        for _ in 0..150_000 {
+            sim.step();
+            min_agl = min_agl.min(sim.agl());
+        }
+        assert!(
+            min_agl > 35.0,
+            "clearance should hold at higher speed: min AGL {min_agl}"
+        );
+    }
+
+    // Past the hill, over open low ground, the commanded altitude eases back down
+    // toward the route altitude (the floor releases).
+    #[test]
+    fn terrain_floor_returns_to_route_past_the_hill() {
+        let hill = hill_at(700.0, 0.0, 120.0, 180.0);
+        let mut sim = fw_over_hill(100.0, 25.0, hill, false);
+        let mut max_cmd = 0.0_f64;
+        for _ in 0..60_000 {
+            sim.step();
+            max_cmd = max_cmd.max(sim.setpoint().altitude);
+        }
+        assert!(max_cmd > 130.0, "should have climbed for the hill: {max_cmd}");
+        // Keep flying well past the hill over open low ground.
+        for _ in 0..150_000 {
+            sim.step();
+        }
+        assert!(
+            sim.setpoint().altitude < 115.0,
+            "command should ease back to the route altitude (~100): {}",
+            sim.setpoint().altitude
+        );
+    }
+
+    // A tall, un-climbable peak dead ahead: with lateral avoidance ON the aircraft
+    // STEERS AROUND it and stays clear; with it OFF (climb-only) it flies into the
+    // wall — the contrast proves the lateral logic is doing the work.
+    #[test]
+    fn terrain_avoidance_steers_around_unclimbable_peak() {
+        // With lateral avoidance: turns away, never goes below the terrain.
+        let mut sim = fw_over_hill(150.0, 25.0, hill_at(700.0, 0.0, 750.0, 200.0), true);
+        let mut min_agl = f64::INFINITY;
+        for _ in 0..90_000 {
+            sim.step();
+            min_agl = min_agl.min(sim.agl());
+        }
+        assert!(
+            min_agl > 0.0,
+            "lateral avoidance should keep the aircraft above terrain: min AGL {min_agl}"
+        );
+        let (_, lon, _) = planet::pci_to_geodetic(sim.truth().position);
+        assert!(
+            lon.abs() > 1e-4,
+            "should have steered off the straight-ahead track: lon {lon}"
+        );
+
+        // Climb-only against the same wall: it cannot out-climb it and busts the
+        // terrain (AGL goes negative).
+        let mut sim2 =
+            fw_over_hill(150.0, 25.0, hill_at(700.0, 0.0, 750.0, 200.0), false);
+        let mut min_agl2 = f64::INFINITY;
+        for _ in 0..90_000 {
+            sim2.step();
+            min_agl2 = min_agl2.min(sim2.agl());
+        }
+        assert!(
+            min_agl2 < 0.0,
+            "climb-only should fail against an un-climbable wall: min AGL {min_agl2}"
+        );
+    }
+
+    // Route-mode lateral avoidance: the shipped configuration. A leg whose great
+    // circle runs straight through a tall un-climbable peak (waypoint beyond it)
+    // must still be flown clear — here the route guidance is actively steering
+    // back toward the leg each gate, so this tests that avoidance wins that
+    // tug-of-war (unlike the setpoint-mode test, where the base course is fixed).
+    #[test]
+    fn terrain_avoidance_steers_around_peak_on_a_route() {
+        let mut cfg = FwSimConfig::aerosonde_at(150.0);
+        cfg.terrain = Some(Arc::new(hill_at(700.0, 0.0, 750.0, 200.0)));
+        let mut sim = FwSim::new(cfg);
+        // Waypoint 1.5 km North — its leg's great circle passes through the peak.
+        sim.set_route(vec![wp_ne(1500.0, 0.0, 150.0)], l_route_cfg());
+        let mut min_agl = f64::INFINITY;
+        for _ in 0..120_000 {
+            sim.step();
+            min_agl = min_agl.min(sim.agl());
+        }
+        assert!(
+            min_agl > 0.0,
+            "route-mode lateral avoidance should clear the peak: min AGL {min_agl}"
+        );
+    }
+
+    // Orbit terminal action: after flying a route to its end the autopilot
+    // loiters around the final fix — circling it at a bounded distance rather
+    // than flying straight off the end (HoldCourse) or parking on the point.
+    #[test]
+    fn route_orbit_loiters_at_the_end() {
+        use crate::fw_guidance::TerminalAction;
+        let mut sim = cruise_sim();
+        let wp = wp_ne(500.0, 0.0, 100.0);
+        let cfg = FwGuidanceConfig {
+            terminal: TerminalAction::Orbit {
+                radius: 150.0,
+                dir: 1.0,
+            },
+            ..l_route_cfg()
+        };
+        sim.set_route(vec![wp], cfg);
+        let mut done = false;
+        for _ in 0..120_000 {
+            sim.step();
+            if sim.route_complete() {
+                done = true;
+                break;
+            }
+        }
+        assert!(done, "route should reach the final waypoint");
+        // Loiter for 60 s: distance to the fix stays bounded (doesn't depart) and
+        // is non-trivial (it circles rather than sitting on the point).
+        let center = wp.position;
+        let (mut dmin, mut dmax) = (f64::INFINITY, 0.0_f64);
+        for _ in 0..60_000 {
+            sim.step();
+            let d = planet::gc_distance(sim.truth().position, center);
+            dmin = dmin.min(d);
+            dmax = dmax.max(d);
+        }
+        assert!(dmax < 450.0, "should loiter near the fix, not depart: dmax {dmax}");
+        assert!(dmin > 30.0, "should circle the fix, not sit on it: dmin {dmin}");
+    }
+
+    // Terrain avoidance adds no RNG: two runs are bit-for-bit identical.
+    #[test]
+    fn terrain_avoidance_is_deterministic() {
+        let run = || {
+            let mut sim =
+                fw_over_hill(120.0, 25.0, hill_at(1000.0, 100.0, 400.0, 200.0), true);
+            sim.run_headless(60_000);
+            *sim.truth()
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a.position, b.position);
+        assert_eq!(a.velocity, b.velocity);
+        assert_eq!(a.attitude, b.attitude);
+        assert_eq!(a.angular_rate, b.angular_rate);
     }
 }

@@ -214,6 +214,24 @@ pub fn gc_distance(a: Vec3, b: Vec3) -> Real {
     PLANET_RADIUS * Float::acos(c)
 }
 
+/// Advance a unit direction `dir` forward along the great circle with unit
+/// normal `n` by surface arc distance `dist` \[m\]; returns the new unit
+/// direction. A Rodrigues rotation of `dir` about `n` by angle
+/// `dist / PLANET_RADIUS`, with the **same forward sense as [`gc_course`]**
+/// (positive `dist` steps along the course `gc_course(dir, n)` reports). Used to
+/// project a look-ahead point along the ground track for terrain scanning. A
+/// degenerate (zero) normal returns `dir` unchanged.
+#[inline]
+pub fn gc_advance(dir: Vec3, n: Vec3, dist: Real) -> Vec3 {
+    let nn = n.norm();
+    if nn < 1e-12 {
+        return dir.normalize();
+    }
+    let axis = nalgebra::Unit::new_unchecked(n / nn);
+    let angle = dist / PLANET_RADIUS;
+    (UnitQuaternion::from_axis_angle(&axis, angle) * dir).normalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +359,29 @@ mod tests {
         // On the leg: ~zero.
         let on = surface(0.0, 0.5);
         assert!(gc_cross_track(on, n).abs() < 1e-3);
+    }
+
+    #[test]
+    fn gc_advance_steps_forward_along_the_arc() {
+        // Heading East along the equator from the prime meridian.
+        let a = surface(0.0, 0.0);
+        let b = surface(0.0, 1.0);
+        let n = gc_normal(a, b);
+        // A quarter circumference East ⇒ land on the equator at 90°E.
+        let dir = gc_advance(a.normalize(), n, PLANET_RADIUS * FRAC_PI_2);
+        let (lat, lon, _) = pci_to_geodetic(dir * PLANET_RADIUS);
+        assert!(lat.abs() < 1e-9, "stayed on the equator: {lat}");
+        assert!((lon - FRAC_PI_2).abs() < 1e-9, "advanced to 90°E: {lon}");
+        // Forward sense matches gc_course (advance follows the reported course).
+        // Zero distance is the identity.
+        let same = gc_advance(a.normalize(), n, 0.0);
+        assert!((same - a.normalize()).norm() < 1e-12);
+        // The arc actually travelled equals the requested distance.
+        let stepped = gc_advance(a.normalize(), n, 500.0);
+        assert!((gc_distance(a, stepped) - 500.0).abs() < 1e-6);
+        // A degenerate (zero) normal leaves the direction unchanged.
+        let deg = gc_advance(a.normalize(), Vec3::zeros(), 500.0);
+        assert!((deg - a.normalize()).norm() < 1e-12);
     }
 
     #[test]

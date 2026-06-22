@@ -36,6 +36,12 @@ pub struct FwSnapshot {
     pub waypoint_index: Option<usize>,
     pub airspeed: Real,
     pub altitude: Real,
+    /// Height above ground level \[m\] (for the HUD): altitude minus the terrain
+    /// directly below. Equals `altitude` when the engine has no terrain oracle.
+    pub agl: Real,
+    /// Terrain-avoidance caution: the autopilot is climbing/steering to clear
+    /// terrain or in a GPWS pull-up (for the HUD).
+    pub terrain_warn: bool,
     /// Local air density \[kg/m³\] at the current altitude (for the HUD): thins
     /// with height, so the envelope (rising stall speed, lapsing thrust) is
     /// visible as a number even though it's felt through the aero.
@@ -76,6 +82,8 @@ impl FwSnapshot {
             waypoint_index: sim.waypoint_index(),
             airspeed: sim.airspeed(),
             altitude: sim.altitude(),
+            agl: sim.agl(),
+            terrain_warn: sim.terrain_warn(),
             density: sim.air_density(),
             course: sim.course(),
             alpha: sim.alpha(),

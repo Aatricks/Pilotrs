@@ -22,6 +22,7 @@ mod guidance;
 mod recording;
 mod scheduler;
 mod telemetry;
+mod terrain_avoid;
 
 pub use atmosphere::{Atmosphere, AtmosphereConfig, StormCell};
 pub use batch::{
@@ -41,6 +42,7 @@ pub use guidance::{Guidance, GuidanceConfig, Waypoint};
 pub use recording::{Recording, ReplayPlayer, RECORDING_VERSION};
 pub use scheduler::Sim;
 pub use telemetry::{Telemetry, TelemetrySample};
+pub use terrain_avoid::{TerrainAvoid, TerrainAvoidConfig, TerrainHeight};
 
 // Re-export the pieces a front-end (viz) commonly needs.
 pub use fsim_core::{

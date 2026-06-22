@@ -124,6 +124,18 @@ impl Default for Terrain {
     }
 }
 
+/// Bridge the procedural height field to the simulator's terrain-avoidance
+/// oracle so the autopilot avoids exactly the surface the viewer renders. The
+/// simulator works in `f64` PCI directions; the field is `f32`, so the only
+/// conversion is at this boundary — the field itself stays `f32`, keeping the
+/// avoided terrain bit-identical to the rendered and crash-checked terrain.
+impl fsim_sim::TerrainHeight for Terrain {
+    fn elevation(&self, dir: fsim_sim::Vec3) -> fsim_sim::Real {
+        let d = Vec3::new(dir.x as f32, dir.y as f32, dir.z as f32);
+        self.height_dir(d) as fsim_sim::Real
+    }
+}
+
 impl Terrain {
     /// A terrain with the default tuning but a chosen seed.
     pub fn new(seed: u32) -> Self {
@@ -1119,6 +1131,60 @@ fn mix_rgb(a: Srgba, b: Srgba, t: f32) -> Srgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // End-to-end against the REAL procedural terrain (not an analytic hill): fly
+    // the autopilot on a route whose leg crosses a genuine mountain and assert it
+    // never drops below the ground. Guards the reported failure — a crash on a
+    // ~430 m peak while cruising at 300 m — on the exact field the viewer renders.
+    #[test]
+    fn autopilot_clears_real_procedural_terrain() {
+        use fsim_sim::{planet, FwGuidanceConfig, FwSim, FwSimConfig, TerrainHeight, Waypoint};
+        use std::sync::Arc;
+
+        let terrain = Terrain::default(); // the shipped field (seed 0x5EED_1234)
+        let r = planet::PLANET_RADIUS;
+
+        // Find the heading from home with the highest terrain ~2 km out: a real
+        // mountain to fly a leg across.
+        let probe = 2000.0;
+        let (mut best_course, mut best_elev) = (0.0_f64, f64::NEG_INFINITY);
+        let mut c = 0.0_f64;
+        while c < std::f64::consts::TAU {
+            let wp = Waypoint::geodetic((probe / r) * c.cos(), (probe / r) * c.sin(), 300.0);
+            let elev = TerrainHeight::elevation(&terrain, wp.position.normalize());
+            if elev > best_elev {
+                best_elev = elev;
+                best_course = c;
+            }
+            c += 0.05;
+        }
+        assert!(
+            best_elev > 350.0,
+            "expected a tall mountain to test against, found {best_elev:.0} m"
+        );
+
+        // A route leg from home across that mountain (waypoint beyond it), cruising
+        // at 300 m — the reported failing condition.
+        let wp = Waypoint::geodetic(
+            (4000.0 / r) * best_course.cos(),
+            (4000.0 / r) * best_course.sin(),
+            300.0,
+        );
+        let mut cfg = FwSimConfig::aerosonde_at(300.0);
+        cfg.terrain = Some(Arc::new(terrain));
+        let mut sim = FwSim::new(cfg);
+        sim.set_route(vec![wp], FwGuidanceConfig::default());
+
+        let mut min_agl = f64::INFINITY;
+        for _ in 0..240_000 {
+            sim.step();
+            min_agl = min_agl.min(sim.agl());
+        }
+        assert!(
+            min_agl > 0.0,
+            "autopilot flew into real terrain (min AGL {min_agl:.0} m) on a {best_elev:.0} m peak"
+        );
+    }
 
     /// Same seed ⇒ identical height at the same sample points (determinism).
     #[test]

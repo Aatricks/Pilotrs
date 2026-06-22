@@ -32,6 +32,7 @@ mod terrain;
 use fsim_sim::planet;
 use fsim_sim::{
     Command, ControllerKind, FixedWingSetpoint, FwCommand, FwFaults, FwGuidanceConfig, FwSample,
+    TerminalAction,
     FwSimConfig, GuidanceConfig, QuadFaults, Quat, Recording, SensorFault, SensorFaults, Setpoint,
     SimConfig, SurfaceFault, TelemetrySample, Waypoint,
 };
@@ -163,12 +164,16 @@ fn make_source(ui: &Ui) -> Source {
         // routes are drawn on the minimap. Spawn above the mountain peaks
         // (≈320 m) so level cruise and routes fly over the terrain, not through
         // it (the sim has no terrain collision).
-        let cfg = if ui.fighter {
+        let mut cfg = if ui.fighter {
             // The relaxed-stability fighter under manual fly-by-wire control.
             FwSimConfig::fighter_manual(ui.fw_altitude as f64)
         } else {
             FwSimConfig::aerosonde_at(ui.fw_altitude as f64)
         };
+        // Give the autopilot the same procedural terrain the viewer renders, so it
+        // climbs over ridges and steers around peaks instead of flying into them.
+        // (Inert under manual control — the fighter starts hand-flown.)
+        cfg.terrain = Some(std::sync::Arc::new(Terrain::new(TERRAIN_SEED)));
         Source::live_fixedwing(cfg)
     } else {
         // Quad missions need the INS estimator — `build_cfg(2, _)` — or the
@@ -1286,6 +1291,9 @@ fn main() {
                 controls_window(egui_ui, &view, hover, &mut ui, replay_info);
                 if view.manual {
                     hud_overlay(egui_ui.ctx(), &view, has_gamepad);
+                } else if is_fixed_wing && view.terrain_warn && !view.crashed {
+                    // Autopilot terrain avoidance is actively climbing/steering.
+                    terrain_caution(egui_ui.ctx());
                 }
                 match &telemetry {
                     ViewTelemetry::Quad(s) => telemetry_window(egui_ui, s),
@@ -1401,6 +1409,12 @@ fn main() {
                     .collect();
                 let cfg = FwGuidanceConfig {
                     airspeed: route.cruise as f64,
+                    // Loiter at the destination rather than flying straight off the
+                    // end of the route — the realistic "hold here" behaviour.
+                    terminal: TerminalAction::Orbit {
+                        radius: 250.0,
+                        dir: 1.0,
+                    },
                     ..FwGuidanceConfig::default()
                 };
                 source.fw_command(FwCommand::SetRoute {
@@ -1798,6 +1812,23 @@ fn sensor_checkbox(ui: &mut egui::Ui, label: &str, sf: &mut SensorFault, on_faul
     if ui.checkbox(&mut on, label).changed() {
         *sf = if on { on_fault } else { SensorFault::Normal };
     }
+}
+
+/// Terrain-avoidance caution banner for the fixed-wing autopilot, shown while
+/// the avoidance layer is actively climbing over or steering around terrain.
+fn terrain_caution(ctx: &egui::Context) {
+    egui::Area::new(egui::Id::new("hud_terrain"))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("⛰ TERRAIN")
+                        .color(egui::Color32::from_rgb(255, 200, 40))
+                        .strong()
+                        .size(24.0),
+                );
+            });
+        });
 }
 
 /// The pilot HUD overlay for the fighter: a prominent FCS ON/OFF banner (with a
