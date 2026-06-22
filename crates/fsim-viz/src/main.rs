@@ -515,12 +515,15 @@ fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
     // Lobe offsets (local NED, in puff-radius units) + relative size — overlapping
     // blobs that read as one billowing cloud rather than a single ball.
     let lobes = [
-        (0.0, 0.0, 0.0, 1.0),
-        (0.9, 0.3, 0.10, 0.72),
-        (-0.8, 0.4, 0.05, 0.66),
-        (0.3, -0.9, 0.12, 0.62),
-        (-0.4, -0.7, 0.0, 0.58),
-        (0.6, 0.9, 0.15, 0.50),
+        (0.0, 0.0, -0.05, 1.0),
+        (0.9, 0.3, 0.06, 0.74),
+        (-0.85, 0.35, 0.04, 0.68),
+        (0.35, -0.9, 0.08, 0.64),
+        (-0.45, -0.75, 0.02, 0.60),
+        (0.6, 0.9, 0.10, 0.54),
+        (1.15, -0.15, 0.05, 0.50),
+        (-0.25, 1.05, 0.06, 0.52),
+        (0.15, 0.0, -0.45, 0.66), // a raised crown (−z = up) for cumulus build-up
     ];
     let mut xforms = Vec::new();
     // Distribute cluster centres evenly over the sphere (a Fibonacci spiral); an
@@ -544,14 +547,14 @@ fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
         let p = dir * (r + alt);
         let q = planet::pci_from_ned(p);
         let rot = to_rot(&q);
-        let base = 60.0 + (h % 5) as f64 * 12.0; // puff radius [m]
+        let base = 66.0 + (h % 5) as f64 * 13.0; // puff radius [m]
         for (dx, dy, dz, sc) in lobes {
             let off = q * fsim_sim::Vec3::new(dx * base, dy * base, dz * base);
             let s = (base * sc) as f32;
             xforms.push(
                 Mat4::from_translation(to_v(&(p + off)))
                     * rot
-                    * Mat4::from_nonuniform_scale(s, s, s * 0.78),
+                    * Mat4::from_nonuniform_scale(s, s, s * 0.82),
             );
         }
     }
@@ -562,22 +565,22 @@ fn build_clouds(context: &Context) -> Gm<InstancedMesh, PhysicalMaterial> {
                 transformations: xforms,
                 ..Default::default()
             },
-            &CpuMesh::sphere(10),
+            &CpuMesh::sphere(12),
         ),
         PhysicalMaterial::new_opaque(
             context,
             &CpuMaterial {
                 albedo: Srgba {
-                    r: 250,
-                    g: 252,
+                    r: 252,
+                    g: 253,
                     b: 255,
                     a: 255,
                 },
                 // Lifts the shadowed undersides toward white (cumulus, not slate).
                 emissive: Srgba {
-                    r: 72,
-                    g: 74,
-                    b: 82,
+                    r: 86,
+                    g: 88,
+                    b: 98,
                     a: 255,
                 },
                 roughness: 1.0,
