@@ -416,11 +416,33 @@ impl TerrainLike for Terrain {
     }
 }
 
+/// A self-lit material for nav lights and the afterburner — near-black albedo so
+/// only the emissive colour shows, reading as a small glowing source.
+fn emissive_mat(context: &Context, r: u8, g: u8, b: u8) -> PhysicalMaterial {
+    PhysicalMaterial::new_opaque(
+        context,
+        &CpuMaterial {
+            albedo: Srgba {
+                r: 16,
+                g: 16,
+                b: 18,
+                a: 255,
+            },
+            emissive: Srgba { r, g, b, a: 255 },
+            roughness: 1.0,
+            metallic: 0.0,
+            ..Default::default()
+        },
+    )
+}
+
 /// A low-poly but jet-like fixed-wing model in FRD body axes (nose +x, right
-/// wing +y, down +z): a rounded fuselage + tapered nose cone, a dark glass
-/// canopy, swept wings and stabilisers, and a swept fin. Returns the parts and
-/// their fixed local base transforms; each frame the live pose is `pose * base`.
-fn build_fw_body(context: &Context) -> (Vec<Gm<Mesh, PhysicalMaterial>>, Vec<Mat4>) {
+/// wing +y, down +z): a rounded fuselage + sharp nose cone, belly intakes, a
+/// glossy glass canopy, swept wings and stabilisers, a swept fin, red/green/white
+/// nav lights and a tail afterburner flame. Returns the parts, their fixed local
+/// base transforms (each frame the live pose is `pose * base`), and the index of
+/// the afterburner part (whose scale is modulated by throttle every frame).
+fn build_fw_body(context: &Context) -> (Vec<Gm<Mesh, PhysicalMaterial>>, Vec<Mat4>, usize) {
     let mut parts = Vec::new();
     let mut bases = Vec::new();
     let mut add = |mesh: CpuMesh, mat: PhysicalMaterial, base: Mat4| {
@@ -434,28 +456,37 @@ fn build_fw_body(context: &Context) -> (Vec<Gm<Mesh, PhysicalMaterial>>, Vec<Mat
 
     // Fuselage: a rounded body along +x (≈13 m).
     add(
-        CpuMesh::cylinder(20),
+        CpuMesh::cylinder(24),
         skin(150, 156, 168),
         Mat4::from_translation(vec3(-6.5, 0.0, 0.0)) * Mat4::from_nonuniform_scale(13.0, 0.8, 0.92),
     );
-    // Tapered nose cone off the front.
+    // Sharp, slender nose cone off the front.
     add(
-        CpuMesh::cone(20),
+        CpuMesh::cone(24),
         skin(150, 156, 168),
-        Mat4::from_translation(vec3(6.5, 0.0, 0.0)) * Mat4::from_nonuniform_scale(3.3, 0.8, 0.92),
+        Mat4::from_translation(vec3(6.5, 0.0, 0.0)) * Mat4::from_nonuniform_scale(4.3, 0.72, 0.84),
     );
+    // Twin belly intakes either side of the centreline (down is body +z).
+    for side in [-1.0_f32, 1.0] {
+        add(
+            CpuMesh::cylinder(14),
+            mat_pbr(context, 84, 90, 102, 0.5, 0.35),
+            Mat4::from_translation(vec3(-1.0, side * 0.62, 0.5))
+                * Mat4::from_nonuniform_scale(4.6, 0.42, 0.5),
+        );
+    }
     // Dark exhaust nozzle at the tail.
     add(
         CpuMesh::cylinder(16),
         mat_pbr(context, 58, 60, 68, 0.5, 0.4),
         Mat4::from_translation(vec3(-7.6, 0.0, 0.0)) * Mat4::from_nonuniform_scale(1.2, 0.62, 0.72),
     );
-    // Canopy: a dark glass bubble on top-front (up is body -z).
+    // Canopy: a glossy dark-glass bubble on top-front (up is body -z).
     add(
-        CpuMesh::sphere(16),
-        mat_pbr(context, 46, 58, 80, 0.15, 0.2),
+        CpuMesh::sphere(20),
+        mat_pbr(context, 44, 56, 80, 0.08, 0.25),
         Mat4::from_translation(vec3(2.0, 0.0, -0.62))
-            * Mat4::from_nonuniform_scale(2.4, 0.74, 0.64),
+            * Mat4::from_nonuniform_scale(2.6, 0.74, 0.66),
     );
     // Swept main wings (right, then left), thin in z, mid-mounted. Each is built
     // root-at-origin, swept about z, then attached to the fuselage.
@@ -501,7 +532,39 @@ fn build_fw_body(context: &Context) -> (Vec<Gm<Mesh, PhysicalMaterial>>, Vec<Mat
             * Mat4::from_translation(vec3(0.0, 0.0, -1.4))
             * Mat4::from_nonuniform_scale(2.4, 0.18, 2.8),
     );
-    (parts, bases)
+    // Nav lights: red on the left wingtip, green on the right, white at the tail
+    // (small self-lit spheres). Wingtips sit ~6 m out, swept aft by the wing sweep.
+    let nav =
+        |x: f32, y: f32, z: f32| Mat4::from_translation(vec3(x, y, z)) * Mat4::from_scale(0.26);
+    add(
+        CpuMesh::sphere(8),
+        emissive_mat(context, 255, 40, 40),
+        nav(-2.2, -6.0, 0.1),
+    );
+    add(
+        CpuMesh::sphere(8),
+        emissive_mat(context, 40, 255, 70),
+        nav(-2.2, 6.0, 0.1),
+    );
+    add(
+        CpuMesh::sphere(8),
+        emissive_mat(context, 255, 255, 245),
+        nav(-7.6, 0.0, -0.45),
+    );
+
+    // Afterburner flame: a cone pointing aft from the nozzle. Its base transform
+    // only positions/orients it; the per-frame length & width (and thus whether it
+    // shows at all) are scaled by throttle in the render loop. Added last so its
+    // index is the final element. (The `add` closure's borrow of `parts`/`bases`
+    // ends after its last call above, freeing them to push the afterburner.)
+    let afterburner = parts.len();
+    parts.push(Gm::new(
+        Mesh::new(context, &CpuMesh::cone(16)),
+        emissive_mat(context, 255, 150, 70),
+    ));
+    bases.push(Mat4::from_translation(vec3(-7.7, 0.0, 0.0)) * Mat4::from_angle_z(degrees(180.0)));
+
+    (parts, bases, afterburner)
 }
 
 /// A scattered field of fluffy cumulus spread across the **whole globe** (so
@@ -687,8 +750,9 @@ fn main() {
         })
         .collect();
 
-    // Fixed-wing body parts + their fixed local base transforms.
-    let (mut fw_body, fw_base) = build_fw_body(&context);
+    // Fixed-wing body parts + their fixed local base transforms (+ the afterburner
+    // part index, whose scale tracks throttle each frame).
+    let (mut fw_body, fw_base, ab_idx) = build_fw_body(&context);
 
     // Trajectory trail: instanced small spheres.
     let mut trail = Gm::new(
@@ -862,8 +926,25 @@ fn main() {
                 }
             }
             AircraftKind::FixedWing => {
-                for (part, base) in fw_body.iter_mut().zip(&fw_base) {
-                    part.set_transformation(pose * *base);
+                // Afterburner: only the upper throttle band lights it, growing the
+                // flame's length/width; below that it scales to nothing.
+                let thr = view.surfaces.map(|s| s.throttle as f32).unwrap_or(0.0);
+                let glow = ((thr - 0.55) / 0.45).clamp(0.0, 1.0);
+                for (i, (part, base)) in fw_body.iter_mut().zip(&fw_base).enumerate() {
+                    if i == ab_idx {
+                        let flame = if glow > 0.01 {
+                            Mat4::from_nonuniform_scale(
+                                1.2 + 4.8 * glow,
+                                0.30 + 0.34 * glow,
+                                0.30 + 0.34 * glow,
+                            )
+                        } else {
+                            Mat4::from_scale(0.0001) // idle: invisible
+                        };
+                        part.set_transformation(pose * *base * flame);
+                    } else {
+                        part.set_transformation(pose * *base);
+                    }
                 }
             }
         }
