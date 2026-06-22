@@ -1390,9 +1390,9 @@ fn controls_window(
                     fighter_controls(ui, st);
                 } else {
                     ui.label("Fixed-wing cruise (or draw a route on the minimap)");
-                    ui.add(egui::Slider::new(&mut st.fw_airspeed, 12.0..=35.0).text("airspeed"));
+                    ui.add(egui::Slider::new(&mut st.fw_airspeed, 12.0..=80.0).text("airspeed"));
                     ui.add(
-                        egui::Slider::new(&mut st.fw_altitude, 50.0..=800.0).text("altitude (m)"),
+                        egui::Slider::new(&mut st.fw_altitude, 50.0..=2000.0).text("altitude (m)"),
                     );
                     ui.add(egui::Slider::new(&mut st.yaw, -180.0..=180.0).text("course (deg)"));
                     if let Some(idx) = view.waypoint_index {

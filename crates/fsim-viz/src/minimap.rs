@@ -261,7 +261,7 @@ impl Minimap {
                     egui::Slider::new(&mut route.alt_up, 0.0..=2000.0).text("route alt (m, up)"),
                 );
                 if is_fixed_wing {
-                    ui.add(egui::Slider::new(&mut route.cruise, 12.0..=35.0).text("cruise (m/s)"));
+                    ui.add(egui::Slider::new(&mut route.cruise, 12.0..=80.0).text("cruise (m/s)"));
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Remove last").clicked() {
