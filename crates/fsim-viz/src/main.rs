@@ -507,6 +507,97 @@ impl Material for SkyMaterial {
     }
 }
 
+/// The fog fragment shader: a depth-based aerial-perspective haze, blended in
+/// *display* space (the scene was already tone/colour-mapped into the offscreen
+/// colour texture), so there is no second tone-mapping to manage. The background
+/// (cleared depth ≈ 1) is exempt so the sky stays clear.
+const FOG_FRAG: &str = "
+uniform mat4 viewProjectionInverse;
+uniform vec3 eyePosition;
+uniform vec3 fogColor;
+uniform float fogDensity;
+in vec2 uvs;
+layout (location = 0) out vec4 outColor;
+vec3 world_pos_from_depth(float depth) {
+    vec4 clip = vec4(uvs * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 p = viewProjectionInverse * clip;
+    return p.xyz / p.w;
+}
+void main() {
+    vec4 color = sample_color(uvs);
+    float depth = sample_depth(uvs);
+    float dist = depth < 0.9999 ? distance(world_pos_from_depth(depth), eyePosition) : 0.0;
+    float x = dist * fogDensity;
+    float f = 1.0 - 1.0 / exp(x * x);
+    outColor = vec4(mix(color.rgb, fogColor, clamp(f, 0.0, 1.0)), 1.0);
+}
+";
+
+/// Depth-based fog applied as a final full-screen pass over the offscreen scene:
+/// distant terrain fades into the horizon-haze colour (aerial perspective), which
+/// also softens the LOD patch edge into the distance. Blends in display space.
+struct DepthFogEffect {
+    color: Vec3,
+    density: f32,
+}
+
+impl Effect for DepthFogEffect {
+    fn fragment_shader_source(
+        &self,
+        _lights: &[&dyn Light],
+        color_texture: Option<ColorTexture>,
+        depth_texture: Option<DepthTexture>,
+    ) -> String {
+        format!(
+            "{}\n{}\n{}",
+            color_texture
+                .expect("fog needs a colour texture")
+                .fragment_shader_source(),
+            depth_texture
+                .expect("fog needs a depth texture")
+                .fragment_shader_source(),
+            FOG_FRAG
+        )
+    }
+
+    fn id(
+        &self,
+        _color_texture: Option<ColorTexture>,
+        _depth_texture: Option<DepthTexture>,
+    ) -> EffectMaterialId {
+        // Constant id in the public/custom range (we always pass single textures).
+        EffectMaterialId(0x0050)
+    }
+
+    fn use_uniforms(
+        &self,
+        program: &Program,
+        viewer: &dyn Viewer,
+        _lights: &[&dyn Light],
+        color_texture: Option<ColorTexture>,
+        depth_texture: Option<DepthTexture>,
+    ) {
+        color_texture
+            .expect("fog needs a colour texture")
+            .use_uniforms(program);
+        depth_texture
+            .expect("fog needs a depth texture")
+            .use_uniforms(program);
+        let vp_inv = (viewer.projection() * viewer.view()).invert().unwrap();
+        program.use_uniform("viewProjectionInverse", vp_inv);
+        program.use_uniform("eyePosition", viewer.position());
+        program.use_uniform("fogColor", self.color);
+        program.use_uniform("fogDensity", self.density);
+    }
+
+    fn render_states(&self) -> RenderStates {
+        RenderStates {
+            depth_test: DepthTest::Always,
+            ..Default::default()
+        }
+    }
+}
+
 /// Adapter so the minimap can sample the real [`Terrain`] without depending on
 /// its concrete type. The minimap is a *local tangent map* at home, so a North/
 /// East offset maps to a direction on the globe ([`ne_to_dir`]) and we sample the
@@ -958,6 +1049,19 @@ fn main() {
 
     let mut gui = GUI::new(&context);
 
+    // Offscreen colour+depth target for the scene, so a depth-based fog pass can
+    // composite it to the screen. Recreated whenever the viewport size changes.
+    // The fog colour matches the sky's horizon haze for a seamless fade.
+    let fog = DepthFogEffect {
+        // Display-space haze ≈ the sky's horizon colour (the offscreen scene is
+        // already display-sRGB, so we blend toward a display colour, not linear).
+        color: vec3(0.70, 0.80, 0.90),
+        density: 2.6e-4,
+    };
+    let mut scene_color: Option<Texture2D> = None;
+    let mut scene_depth: Option<DepthTexture2D> = None;
+    let mut fb_size = (0u32, 0u32);
+
     window.render_loop(move |mut frame_input| {
         camera.set_viewport(frame_input.viewport);
 
@@ -1361,11 +1465,47 @@ fn main() {
         // Sky gradient follows the aircraft's local radial (so the zenith is always
         // overhead wherever we are on the globe).
         sky.local_up = pos.normalize();
-        frame_input
-            .screen()
+
+        // (Re)create the offscreen scene textures when the viewport size changes.
+        let vp = frame_input.viewport;
+        if (vp.width, vp.height) != fb_size {
+            fb_size = (vp.width, vp.height);
+            scene_color = Some(Texture2D::new_empty::<[u8; 4]>(
+                &context,
+                vp.width.max(1),
+                vp.height.max(1),
+                Interpolation::Linear,
+                Interpolation::Linear,
+                None,
+                Wrapping::ClampToEdge,
+                Wrapping::ClampToEdge,
+            ));
+            scene_depth = Some(DepthTexture2D::new::<f32>(
+                &context,
+                vp.width.max(1),
+                vp.height.max(1),
+                Wrapping::ClampToEdge,
+                Wrapping::ClampToEdge,
+            ));
+        }
+        let color = scene_color.as_ref().unwrap();
+        let depth = scene_depth.as_ref().unwrap();
+
+        // Render the sky + scene into the offscreen target...
+        RenderTarget::new(color.as_color_target(None), depth.as_depth_target())
             .clear(ClearState::color_and_depth(0.55, 0.70, 0.85, 1.0, 1.0))
             .apply_screen_material(&sky, &camera, &[])
-            .render(&camera, objects, &[&ambient, &directional])
+            .render(&camera, objects, &[&ambient, &directional]);
+        // ...then composite it to the screen through the fog and draw egui on top.
+        frame_input
+            .screen()
+            .apply_screen_effect(
+                &fog,
+                &camera,
+                &[],
+                Some(ColorTexture::Single(color)),
+                Some(DepthTexture::Single(depth)),
+            )
             .write(|| gui.render())
             .unwrap();
 
