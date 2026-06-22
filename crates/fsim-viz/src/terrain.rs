@@ -478,34 +478,34 @@ impl Terrain {
         let p = dir * R_PLANET; // surface point in metres
         let pw = self.domain_warp(p, bw); // warped, for natural coasts/ranges
 
-        // Continents: a warped low-frequency field, lightly ridged, decides the
-        // land/ocean split as before — SEA_FRACTION of the field is ocean (deep,
-        // to −valley_depth), the rest gentle land up to PLAINS, meeting at sea.
-        let v = self.fbm3_at(pw, 1.0 / bw, 5, 0.0);
-        let ridged_c = 1.0 - (2.0 * v - 1.0).abs();
-        let shaped = 0.7 * v + 0.3 * ridged_c;
-        let base = if shaped < SEA_FRACTION {
-            lerp(-self.valley_depth, self.sea_level, shaped / SEA_FRACTION)
+        // Continents: value-noise fBm clusters hard around 0.5, so stretch it with
+        // a contrast curve before the land/ocean split — otherwise land collapses
+        // into a thin band just above sea level instead of varied plateaus/plains.
+        let cont = smoothstep(0.34, 0.66, self.fbm3_at(pw, 1.0 / bw, 5, 0.0));
+        let base = if cont < SEA_FRACTION {
+            lerp(-self.valley_depth, self.sea_level, cont / SEA_FRACTION)
         } else {
             lerp(
                 self.sea_level,
                 PLAINS_HEIGHT,
-                (shaped - SEA_FRACTION) / (1.0 - SEA_FRACTION),
+                (cont - SEA_FRACTION) / (1.0 - SEA_FRACTION),
             )
         };
 
-        // How far inland/up we are (0 at the coast, 1 on high plains) — gates the
-        // mountains so ranges rise from the interior, not straight out of the sea.
-        let land = ((base - self.sea_level) / (PLAINS_HEIGHT - self.sea_level)).clamp(0.0, 1.0);
+        // Soft land gate: mountains fade in just above the waterline (so they don't
+        // erupt straight out of the sea) but are NOT scaled by how high the base is
+        // — otherwise the mostly-low continents would crush every range flat.
+        let on_land = smoothstep(self.sea_level, self.sea_level + 55.0, base);
 
-        // Mountain ranges: a sharpened low-frequency mask × a ridged multifractal,
-        // so big peaks cluster into chains over an otherwise rolling landscape.
-        let mask = smoothstep(0.5, 0.82, self.fbm3_at(pw, 1.0 / (bw * 1.7), 4, 200.0));
-        let ridged = self.ridge3_at(pw, 1.0 / (bw * 0.5), 4);
-        let mountains = mask * ridged.powf(1.3) * (PEAK_HEIGHT - PLAINS_HEIGHT) * land;
+        // Mountain ranges: a stretched low-frequency mask (where ranges live) ×
+        // a stretched ridged multifractal (the ridge crests). Both fields are
+        // remapped to span [0,1] so peaks actually reach PEAK_HEIGHT.
+        let mask = smoothstep(0.50, 0.66, self.fbm3_at(pw, 1.0 / (bw * 1.7), 4, 200.0));
+        let ridges = smoothstep(0.22, 0.80, self.ridge3_at(pw, 1.0 / (bw * 0.5), 4));
+        let mountains = mask * ridges * (PEAK_HEIGHT - PLAINS_HEIGHT) * on_land;
 
-        // Fine relief (hills/erosion), kept small and confined to land.
-        let detail = (self.fbm3_at(p, 1.0 / (bw * 0.2), 3, 400.0) - 0.5) * 80.0 * land;
+        // Fine relief (hills/erosion), on land — adds rolling texture to the plains.
+        let detail = (self.fbm3_at(p, 1.0 / (bw * 0.25), 3, 400.0) - 0.5) * 110.0 * on_land;
 
         let h = (base + mountains + detail).clamp(-self.valley_depth, PEAK_HEIGHT);
 
@@ -573,20 +573,22 @@ impl Terrain {
 
         let elev = h - self.sea_level; // metres above the waterline
         let lat = dir.z.abs(); // 0 at equator, 1 at the poles
-                               // Warm at the low equator, cold toward the poles and with altitude.
-        let temp = (1.0 - lat * 1.05 - elev / 1500.0).clamp(0.0, 1.0);
+                               // Temperature: cooler toward the poles and with altitude, plus a
+                               // continent-scale climate wobble so the equator isn't one warm biome.
+        let temp =
+            (1.0 - lat * 0.95 - elev / 1400.0 + (self.climate(dir) - 0.5) * 0.55).clamp(0.0, 1.0);
         let moisture = self.moisture(dir);
 
         // Stylized-vivid biome endpoints.
-        let beach = rgb(224, 211, 164);
-        let desert = rgb(216, 180, 116);
-        let savanna = rgb(176, 166, 92);
-        let jungle = rgb(30, 116, 46);
-        let steppe = rgb(150, 152, 96);
-        let grass = rgb(94, 156, 60);
-        let forest = rgb(42, 108, 48);
-        let tundra = rgb(140, 146, 120);
-        let rock = rgb(120, 112, 104);
+        let beach = rgb(226, 212, 162);
+        let desert = rgb(222, 184, 116);
+        let savanna = rgb(190, 174, 92);
+        let jungle = rgb(26, 122, 46);
+        let steppe = rgb(158, 158, 96);
+        let grass = rgb(96, 162, 58);
+        let forest = rgb(38, 104, 46);
+        let tundra = rgb(150, 154, 126);
+        let rock = rgb(122, 114, 106);
         let snow = rgb(247, 250, 254);
 
         // Warm row (dry→wet): desert → savanna → jungle.
@@ -598,9 +600,9 @@ impl Terrain {
 
         // Blend rows by temperature.
         let mut ground = if temp > 0.5 {
-            mix_rgb(temperate, warm, smoothstep(0.5, 0.85, temp))
+            mix_rgb(temperate, warm, smoothstep(0.5, 0.82, temp))
         } else {
-            mix_rgb(cold, temperate, smoothstep(0.18, 0.5, temp))
+            mix_rgb(cold, temperate, smoothstep(0.16, 0.5, temp))
         };
 
         // Sandy shoreline just above the waterline.
@@ -610,18 +612,28 @@ impl Terrain {
         let city = self.urban(dir, temp, elev, slope);
         ground = mix_rgb(ground, rgb(122, 120, 126), city);
 
-        // Bare rock on steep faces.
-        let rock_mix = smoothstep(0.30, 0.6, slope);
-        ground = mix_rgb(ground, rock, rock_mix);
+        // Alpine bare rock above the (temperature-dependent) tree line, so
+        // mountains read green at the base → rock higher up, not green to the top.
+        let treeline = lerp(240.0, 900.0, temp);
+        let alpine = smoothstep(treeline, treeline + 220.0, elev);
+        ground = mix_rgb(ground, rock, alpine);
 
-        // Snow line: lower where it is colder; snow caps the peaks and cold high
-        // ground, blending up from rock just below the line.
-        let snowline = lerp(560.0, 1500.0, temp);
+        // Bare rock on steep faces at any elevation.
+        ground = mix_rgb(ground, rock, smoothstep(0.32, 0.6, slope) * 0.9);
+
+        // Fine colour mottle (a few-cell-wide value noise) so flat ground reads as
+        // textured rather than a dead-flat fill — cheap detail with no extra tris.
+        let mp = dir * R_PLANET;
+        let mottle =
+            self.value_noise_3d(mp.x * 0.012 + 3.0, mp.y * 0.012 + 7.0, mp.z * 0.012 + 11.0);
+        ground = scale_rgb(ground, 0.93 + 0.14 * mottle);
+
+        // Snow line: lower where colder; caps peaks and cold high ground.
+        let snowline = lerp(420.0, 1080.0, temp);
         let snowy = smoothstep(snowline - 130.0, snowline + 40.0, elev);
-        ground = mix_rgb(ground, snow, snowy);
+        ground = mix_rgb(ground, snow, snowy.max(polar));
 
-        // Polar ice cap.
-        mix_rgb(ground, rgb(240, 246, 252), polar)
+        ground
     }
 
     /// Stylized urban cover in `[0, 1]`: rare grey patches on flat, temperate
@@ -848,15 +860,25 @@ impl Terrain {
         p + Vec3::new(wx, wy, wz) * (bw * 0.55)
     }
 
-    /// Surface moisture in `[0, 1]` at a direction: a low-frequency field, drier
-    /// in the subtropical band near ~30° latitude (Earth's desert belt).
+    /// Surface moisture in `[0, 1]` at a direction: a low-frequency field stretched
+    /// to span the full range (so deserts and rainforests both appear, not just
+    /// mid-moisture grass everywhere), drier in the subtropical band near ~30°.
     fn moisture(&self, dir: Vec3) -> f32 {
         let p = dir * R_PLANET;
         let bw = self.base_wavelength.max(1.0);
-        let m = self.fbm3_at(p, 1.0 / (bw * 1.3), 4, 900.0);
+        let m = smoothstep(0.30, 0.64, self.fbm3_at(p, 1.0 / (bw * 1.3), 4, 900.0));
         let lat = dir.z.abs(); // 0 at equator, 1 at the poles (≈ sin lat)
-        let dry_band = (1.0 - ((lat - 0.5).abs() / 0.18).min(1.0)) * 0.3;
+        let dry_band = (1.0 - ((lat - 0.5).abs() / 0.18).min(1.0)) * 0.35;
         (m - dry_band).clamp(0.0, 1.0)
+    }
+
+    /// A continent-scale climate field in `[0, 1]`, independent of latitude — used
+    /// to vary temperature so the equatorial spawn isn't a single warm biome: some
+    /// regions read cooler (temperate forest/grass), others hotter (desert/jungle).
+    fn climate(&self, dir: Vec3) -> f32 {
+        let p = dir * R_PLANET;
+        let bw = self.base_wavelength.max(1.0);
+        smoothstep(0.34, 0.66, self.fbm3_at(p, 1.0 / (bw * 2.2), 4, 1300.0))
     }
 }
 
@@ -973,6 +995,19 @@ fn home_blend(r: f32, inner: f32, outer: f32) -> f32 {
 #[inline]
 fn rgb(r: u8, g: u8, b: u8) -> Srgba {
     Srgba { r, g, b, a: 255 }
+}
+
+/// Scale a display-space colour's brightness by `f` (clamped per channel) — used
+/// for the cheap terrain colour mottle.
+#[inline]
+fn scale_rgb(c: Srgba, f: f32) -> Srgba {
+    let s = |x: u8| -> u8 { (x as f32 * f).clamp(0.0, 255.0) as u8 };
+    Srgba {
+        r: s(c.r),
+        g: s(c.g),
+        b: s(c.b),
+        a: 255,
+    }
 }
 
 /// Linear-ish blend of two display-space colours by `t ∈ [0,1]`, returned as an
@@ -1303,7 +1338,9 @@ mod tests {
         }
     }
 
-    /// `height_dir` is deterministic and stays within `[min_height, max_height]`.
+    /// `height_dir` is deterministic and stays within the spherical terrain's
+    /// range `[-valley_depth, PEAK_HEIGHT]` (the globe rises into mountain ranges
+    /// well above the gentle flat-path `amplitude`).
     #[test]
     fn height_dir_deterministic_and_bounded() {
         let a = Terrain::new(7);
@@ -1319,7 +1356,7 @@ mod tests {
             let ha = a.height_dir(d);
             assert_eq!(ha, b.height_dir(d), "not deterministic");
             assert!(
-                ha >= a.min_height() - 1e-3 && ha <= a.max_height() + 1e-3,
+                ha >= -a.valley_depth - 1e-3 && ha <= PEAK_HEIGHT + 1e-3,
                 "height_dir {ha} out of bounds"
             );
         }
