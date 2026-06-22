@@ -315,7 +315,7 @@ impl Terrain {
         if h <= self.sea_level {
             let depth = ((self.sea_level - h) / (self.sea_level - self.min_height()).max(1.0))
                 .clamp(0.0, 1.0);
-            return mix_rgb(rgb(50, 110, 162), rgb(16, 46, 84), depth);
+            return mix_rgb(rgb(46, 124, 182), rgb(12, 38, 90), depth);
         }
         let span = (self.max_height() - self.sea_level).max(1.0);
         let t = ((h - self.sea_level) / span).clamp(0.0, 1.0);
@@ -326,25 +326,28 @@ impl Terrain {
     /// coast → green lowland → grass → tan → grey rock → snow by elevation
     /// fraction `t ∈ [0,1]`, with brown rock blended onto steep faces.
     fn land_ramp(&self, t: f32, slope: f32) -> Srgba {
-        let shore = rgb(196, 188, 138); // sandy coast just above the water
-        let lowland = rgb(62, 116, 54); // lush low ground
-        let grass = rgb(96, 138, 64); // rolling green
-        let tan = rgb(150, 140, 96); // dry highland
-        let rock_hi = rgb(122, 114, 106); // bare grey rock
-        let snow = rgb(240, 244, 248); // near-white peak
-        let base = if t < 0.04 {
-            mix_rgb(shore, lowland, t / 0.04)
+        let shore = rgb(216, 205, 158); // bright sandy coast just above the water
+        let lowland = rgb(54, 126, 50); // lush, saturated low ground
+        let grass = rgb(92, 152, 58); // rolling green
+        let tan = rgb(162, 150, 102); // dry highland
+        let rock_hi = rgb(124, 116, 108); // bare grey rock
+        let snow = rgb(245, 249, 253); // crisp white peak
+        let base = if t < 0.035 {
+            mix_rgb(shore, lowland, t / 0.035)
         } else if t < 0.30 {
-            mix_rgb(lowland, grass, (t - 0.04) / 0.26)
+            mix_rgb(lowland, grass, (t - 0.035) / 0.265)
         } else if t < 0.55 {
             mix_rgb(grass, tan, (t - 0.30) / 0.25)
-        } else if t < 0.80 {
-            mix_rgb(tan, rock_hi, (t - 0.55) / 0.25)
+        } else if t < 0.78 {
+            mix_rgb(tan, rock_hi, (t - 0.55) / 0.23)
+        } else if t < 0.86 {
+            // A narrow band so the snow line reads as a crisp edge, not a long fade.
+            mix_rgb(rock_hi, snow, (t - 0.78) / 0.08)
         } else {
-            mix_rgb(rock_hi, snow, (t - 0.80) / 0.20)
+            snow
         };
-        let rock = rgb(96, 80, 64);
-        let rock_mix = ((slope - 0.18) / 0.30).clamp(0.0, 1.0);
+        let rock = rgb(92, 78, 62);
+        let rock_mix = ((slope - 0.16) / 0.26).clamp(0.0, 1.0);
         mix_rgb(base, rock, rock_mix)
     }
 
@@ -533,7 +536,7 @@ impl Terrain {
             // Ocean: deep→shallow by depth, freezing to sea-ice near the poles.
             let depth = ((self.sea_level - h) / (self.sea_level - self.min_height()).max(1.0))
                 .clamp(0.0, 1.0);
-            let ocean = mix_rgb(rgb(44, 116, 170), rgb(12, 38, 92), depth);
+            let ocean = mix_rgb(rgb(46, 124, 182), rgb(10, 36, 88), depth);
             return mix_rgb(ocean, rgb(226, 236, 242), polar * 0.85);
         }
         // Land: elevation fraction above sea level + slope, then snow at the poles.

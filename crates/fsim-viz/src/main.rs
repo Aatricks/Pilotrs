@@ -45,9 +45,10 @@ use three_d::*;
 /// Procedural-terrain seed (fixed so the map is the same every run).
 const TERRAIN_SEED: u32 = 0x5EED_1234;
 
-/// Latitude bands of the globe mesh (× 2 longitudes). 400 → ~50 m cells near
-/// home, ~640 k triangles — built once.
-const GLOBE_BANDS: usize = 400;
+/// Latitude bands of the globe mesh (× 2 longitudes). 480 → ~42 m cells near
+/// home, ~920 k triangles — built once. (Finer coastlines / silhouette; the one
+/// knob to dial back if the globe ever costs too much GPU.)
+const GLOBE_BANDS: usize = 480;
 
 /// Clearance \[m\] below which the aircraft is considered to have hit the terrain.
 const CRASH_MARGIN: f32 = 3.0;
