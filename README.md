@@ -5,63 +5,42 @@
 [![Core](https://img.shields.io/badge/core-no__std-success.svg)](#workspace-layout)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-A from-scratch **6-degrees-of-freedom flight simulator and autopilot**, written in Rust. It runs the full rigid-body dynamics of a **quadrotor** and a **fixed-wing** wrapped in a complete **sensing → estimation → control** stack over a spherical, 1/1000-scale Earth.
+A 6-DOF flight simulator and autopilot written from scratch in Rust. It runs full rigid-body physics for a quadrotor and a fixed-wing over a 1/1000-scale spherical Earth, using a custom sensing -> estimation -> control stack.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Pilotrs — hand-flying the fly-by-wire fighter over the 1/1000-scale Earth" width="640">
 </p>
 <p align="center"></p>
 
-The defining constraint: **the autopilot never sees ground truth.** It flies on noisy, degraded sensor measurements fused by an onboard estimator.
+The catch: **the autopilot never gets ground truth.** It only knows what its noisy, drifted sensors tell it, which goes through an onboard estimator before reaching the flight controller.
 
-Built on [`nalgebra`](https://nalgebra.org), kept **`no_std`-clean** in the flight-control core (so it can target embedded / Ferrocene toolchains), and visualized with [`three-d`](https://github.com/asny/three-d) + [`egui`](https://github.com/emilk/egui).
+Everything is built on top of [`nalgebra`](https://nalgebra.org). The flight core is strictly `no_std` so it could run on real microcontroller hardware or Ferrocene. The frontend is visualized with [`three-d`](https://github.com/asny/three-d) and [`egui`](https://github.com/emilk/egui).
 
 <p align="center">
   <img src="docs/diagram.svg" alt="Diagram of the simulation modules interactions" width="640">
 </p>
 
-The controller and estimator consume **only** the estimator's output, never truth.
-
-## Features
-
-**Dynamics & integration**
-- 6DOF rigid-body equations of motion with the full non-diagonal inertia tensor, shared verbatim by both airframes.
-- Fixed-step **RK4** integrator at 1 kHz with per-step quaternion renormalization.
-- A quadrotor plant (thrust + drag) and a Beard & McLain **fixed-wing aerodynamic model** (lift/drag/moment coefficients, stall blend, control surfaces, propeller) with a Newton **trim** solver.
-
-**Sensing & estimation**
-- Sensor models — IMU, GPS, barometer, magnetometer are each degrading truth with seeded, reproducible noise and bias random-walk.
-- Three selectable estimators: a **complementary filter**, a 6-state **quaternion MEKF** (attitude + gyro bias), and a 15-state **INS** (GPS/baro/velocity/mag fusion) that treats the accelerometer as a strapdown input, so sustained acceleration doesn't corrupt attitude.
-
-**Control & guidance**
-- A cascaded **PID** and an **LQR** inner loop, swappable per run behind a common `Controller` trait.
-- Position/velocity control and **waypoint missions** for the quadrotor.
-- A successive-loop **fixed-wing autopilot** holding airspeed, altitude, and course, with coordinated turns.
-
-**Fly-by-wire fighter**
-- Through **keyboard or gamepad**, you can hand-fly a **relaxed-stability fighter**: an airframe with a *negative static margin* that is unstable open-loop and pitches away from trim in a fraction of a second.
-- An onboard **fly-by-wire** flight-control system with angle-of-attack and rate feedback, pilot command augmentation, dynamic-pressure gain scheduling, helps turning that divergent airframe into a controlled one. **One key toggles it off**, so you can feel the airframe depart the instant the computer stops flying it. That contrast *is* the demo: a modern fighter is its control laws.
-- The instability is proven, not asserted: the short-period eigenvalues are linearized about trim and sit in the **right-half plane open-loop**, the **left-half plane closed-loop**.
-
-**Spherical world**
-- The planet is a **1/1000-scale Earth** (6371 m radius). The fixed-wing flies in a planet-centered inertial frame with **radial, inverse-square gravity** and **great-circle** routes. The quadrotor flies in a flat local-tangent frame near home, where the curvature is negligible.
-
-**Tooling**
-- The deterministic simulation runs on its own thread, decoupled from rendering.
-- Bit-exact telemetry **record/replay** and a **parallel Monte-Carlo** harness that runs faster than real time.
-- An interactive **3D viewer**: switch airframes, watch the aircraft fly over a displaced globe with a follow-camera, plan routes on a zoomable **planisphere** world map, and read live estimate-vs-truth telemetry.
 
 
-## Conventions
+## What's inside
 
-Defined once in `fsim-core`:
+- **Physics & Models**: 6-DOF rigid body dynamics shared by both the quadrotor and the fixed-wing. Integrates using RK4 at 1 kHz. Includes aerodynamic lift/drag/moment curves and a trim solver for the plane.
+- **Sensors**: Simulated IMU, GPS, barometer, and magnetometer. They all have configurable, reproducible noise and bias walk so they behave like real hardware.
+- **State Estimation**: Three estimators you can swap: a simple complementary filter, a 6-state MEKF (attitude + gyro bias), and a 15-state INS (GPS/baro/velocity/mag fusion). The INS is robust enough that pulling Gs won't mess up your attitude.
+- **Flight Controllers**: Swappable cascaded PID and LQR inner loops sharing a `Controller` trait. The quad has waypoint tracking, and the plane has a successive-loop autopilot to hold heading, altitude, and airspeed.
+- **Fly-by-Wire Fighter**: The fighter jet is aerodynamically unstable (negative static margin), so it crashes instantly without computer help. The onboard FCS uses angle-of-attack and rate feedback to stabilize it. You can press `F` to turn off the FCS and feel how bad the raw airframe actually is.
+- **Interactive 3D Viewer**: Built with `three-d` and `egui`. Runs the simulator on a separate thread, lets you record/replay flight logs, run parallel Monte-Carlo simulations, drop waypoints on a map, and see live telemetry.
 
-- **World frame:** North-East-Down, gravity is +z, altitude is −z.
-- **Body frame:** Forward-Right-Down, at the center of gravity.
-- **Attitude:** `q_{world←body}`, Hamilton convention, renormalized every step.
-- **Angular rate** is expressed in the body frame (what the gyro measures).
 
-The fixed-wing's "world" is instead a planet-centered inertial frame; its local North-East-Down is a tangent frame derived from the current position. The equations of motion are frame-agnostic, so only gravity (now radial) and the navigation math (great circles) differ.
+## Coordinate Frames & Math
+
+To keep sanity, everything in `fsim-core` uses:
+- **World frame:** North-East-Down (NED), so +z is down and altitude is -z.
+- **Body frame:** Forward-Right-Down (FRD), centered at the CG.
+- **Attitude:** Hamilton quaternions (`q_{world<-body}`), normalized every step.
+- **Rates:** Angular velocity is in the body frame (matches what the gyros output).
+
+For the fixed-wing, the "world" is actually a planet-centered frame, and its local NED frame shifts dynamically as it flies. The physics code is frame-agnostic, so we just swap in radial gravity and great-circle navigation.
 
 ## Building and running
 
@@ -75,7 +54,11 @@ cargo run -p fsim-sim  --release --example fixedwing_cruise # the fixed-wing cli
 cargo run -p fsim-sim  --example record_replay             # record a run, reload it, replay it
 ```
 
-In the viewer, the **airframe** selector flies the quad, the autopilot fixed-wing, or the **Fighter (FBW)**. The other panels switch the estimator (complementary / MEKF / INS) and inner controller (PID / LQR), set the attitude or cruise target, and plot estimate vs. truth vs. setpoint; the **Route planner** is a zoomable world map — click to drop waypoints, then dispatch them to the active aircraft.
+Once the viewer is running, you can use the UI panels to:
+- Swap between the quadrotor, the fixed-wing autopilot, and the manual **Fighter (FBW)**.
+- Hot-swap the estimator (complementary / MEKF / INS) and the inner controller (PID / LQR).
+- Set targets (attitude or cruise) and see live plots comparing the estimate vs. ground truth.
+- Click on the zoomable world map in the **Route planner** to set waypoints for the aircraft to follow.
 
 Pick **Fighter (FBW)** and you fly by hand:
 
@@ -84,15 +67,15 @@ Pick **Fighter (FBW)** and you fly by hand:
 | **keyboard** | `W` / `S` | `A` / `D` | `Q` / `E` | `Shift` / `Ctrl` | `F` | `R` |
 | **gamepad** | left stick | left stick | right stick | right stick | `A` | `Start` |
 
-> [!TIP]
-> Fly the fighter with the FCS on, then press `F` to disable it and see the behavior.
+### Some things to try:
+1. **Manual Flying**: Try flying the fighter with the computer assist (FCS) turned on, then hit `F` to disable it. It will immediately tumble out of control because the raw airframe is aerodynamically unstable.
+2. **Estimator Drift**: The MEKF assumes gravity is the only acceleration it feels. If you pull a long, sustained turn, the attitude estimate will drift because it gets confused by the centrifugal acceleration. If you swap to the INS, it uses GPS/velocity fusion to handle sustained turns without drifting.
 
-> [!NOTE]
-> The MEKF is an AHRS: it assumes the accelerometer sees gravity, so a sustained translating maneuver degrades its attitude estimate. The INS removes this limitation you may try doing a large tilt under the MEKF, then switch to the INS.
+## Toolchain & Safety-Critical Rust
 
-## Toolchain & Ferrocene
+The project runs on stable Rust, but it's built to support Ferrocene (the certified safety-critical Rust compiler) with an MSRV of 1.91 and a clean `no_std` core.
 
-Develop on stable Rust. The code is kept compatible with [Ferrocene](https://ferrous-systems.com/ferrocene/) (the qualified Rust toolchain) by construction : MSRV 1.91 and a `no_std`-clean core. A dormant `criticalup.toml` is in place so the Ferrocene compiler can be swapped in without refactoring once a subscription token is configured:
+If you have a Ferrocene license, you can swap the compiler in using the included `criticalup.toml`:
 
 ```bash
 criticalup auth set && criticalup install && criticalup run cargo build
