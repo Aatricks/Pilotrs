@@ -344,11 +344,19 @@ mod tests {
         let mut g = FwGuidance::new(vec![wp], start, cfg());
         // At the start of the leg: near the origin altitude (not the target's).
         let s0 = g.update(start);
-        assert!((s0.altitude - 100.0).abs() < 5.0, "start ~100: {}", s0.altitude);
+        assert!(
+            (s0.altitude - 100.0).abs() < 5.0,
+            "start ~100: {}",
+            s0.altitude
+        );
         // Halfway along: about midway in altitude.
         let mid = Waypoint::geodetic(1000.0 / PLANET_RADIUS, 0.0, 0.0).position;
         let sm = g.update(mid);
-        assert!((sm.altitude - 150.0).abs() < 12.0, "mid ~150: {}", sm.altitude);
+        assert!(
+            (sm.altitude - 150.0).abs() < 12.0,
+            "mid ~150: {}",
+            sm.altitude
+        );
     }
 
     // Orbit terminal: after capturing the final waypoint it loiters — holding the

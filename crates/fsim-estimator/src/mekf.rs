@@ -146,34 +146,44 @@ impl Mekf {
         let y_hat = self.q.inverse() * v_ref;
 
         let mut h = Mat36::zeros();
+        // Jacobien de mesure H = [ [ŷ]ₓ , 0 ] : la sensibilité de la direction mesurée à une
+        // petite erreur d'attitude δθ vaut exactement [ŷ]ₓ ; le biais gyro n'agit pas ⇒ bloc
+        // droit nul.
         h.fixed_view_mut::<3, 3>(0, 0).copy_from(&skew(y_hat));
 
         let r = Matrix3::identity() * var;
+        // Covariance d'innovation S = H P Hᵀ + R : propage l'incertitude d'état à travers H
+        // et y ajoute le bruit capteur R (pondère ensuite le gain).
         let s = h * self.p * h.transpose() + r;
         let s_inv = match s.try_inverse() {
             Some(inv) => inv,
             None => return false,
         };
 
+        // Innovation (z − ŷ) et son test χ² (NIS = innovᵀ S⁻¹ innov, en 1×1). Si nis > chi2 la
+        // mesure est aberrante (accéléro pollué par l'accélération du véhicule) → on la rejette.
         let innov = z - y_hat;
-        // χ² innovation gate (also rejects the gravity update when the
-        // accelerometer direction is corrupted by vehicle acceleration).
         let nis = (innov.transpose() * s_inv * innov)[(0, 0)];
         if nis > chi2 {
             return false;
         }
 
-        let k = self.p * h.transpose() * s_inv; // 6x3 Kalman gain
+        // Gain de Kalman K = P Hᵀ S⁻¹ et correction d'erreur dx = K·innov (3 premières
+        // composantes = attitude, 3 suivantes = biais gyro).
+        let k = self.p * h.transpose() * s_inv;
         let dx = k * innov;
-
         // Inject: q ← q ⊗ δq(δθ), b_g ← b_g + δb_g (then error reset to 0).
         let dtheta = Vec3::new(dx[0], dx[1], dx[2]);
         let dbias = Vec3::new(dx[3], dx[4], dx[5]);
+        // Injection MEKF : attitude corrigée par multiplication à DROITE (sur la variété des
+        // rotations — pas de dérive hors sphère unité) puis renormalisée ; biais corrigé par
+        // addition (espace vectoriel). L'erreur est ensuite implicitement remise à zéro.
         self.q *= UnitQuaternion::from_scaled_axis(dtheta);
         self.q.renormalize();
         self.bias += dbias;
-
-        // Joseph-form covariance update (numerically stable, stays PSD).
+        // Mise à jour de covariance, forme de Joseph : P ← (I−KH) P (I−KH)ᵀ + K R Kᵀ. Reste
+        // symétrique et semi-définie positive malgré l'arrondi (l'écriture courte (I−KH)P
+        // peut rendre P non-PSD et faire diverger le filtre).
         let ikh = Mat6::identity() - k * h;
         self.p = ikh * self.p * ikh.transpose() + k * r * k.transpose();
         self.symmetrize();

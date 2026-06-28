@@ -168,13 +168,16 @@ impl Atmosphere {
             let (dn, de) = (pos_n - cn, pos_e - ce);
             let r2 = dn * dn + de * de;
             let rad = Float::max(s.radius, 1.0);
+            // Poids gaussien de la cellule : g = exp(−r²/rad²), 1 au cœur, s'estompe avec la
+            // distance ; pondère tous les effets de l'orage.
             let g = Float::exp(-r2 / (rad * rad));
             self.last_g = g;
-            // Downdraft (NED +z = down) sinks the air at the core.
+            // Rabattant au cœur de la cellule (z NED = vers le bas).
             wind.z += s.downdraft * g;
-            // Radial outflow: diverging horizontal wind, peaking near the radius.
             let r = Float::sqrt(r2);
             if r > 1e-3 {
+                // Écoulement radial divergent : nul au centre, culmine vers le bord (microrafale
+                // qui s'étale au sol), dirigé du centre vers l'aéronef ((dn,de)/r = radial unitaire).
                 let out = s.outflow * (r / rad) * g;
                 wind.x += out * dn / r;
                 wind.y += out * de / r;
@@ -185,13 +188,15 @@ impl Atmosphere {
         if turb > 0.0 {
             let va_s = Float::max(va, self.cfg.va_min);
             for i in 0..3 {
-                // Gauss–Markov: g ← a·g + σ·√(1−a²)·N(0,1), a = exp(−dt·V/L).
-                // Stationary variance is σ², correlation time L/V — a first-order
-                // Dryden gust. `turb` is boosted inside the storm.
                 let l = Float::max(self.cfg.scale_lengths[i], 1.0);
+                // Coefficient de corrélation Gauss-Markov : a = exp(−dt·Va/L). Proche de 1 ⇒
+                // rafale lente et corrélée (temps L/Va) ; proche de 0 ⇒ bruit quasi blanc.
                 let a = Float::exp(-dt * va_s / l);
                 let n: Real = StandardNormal.sample(&mut self.rng);
-                self.gust[i] = a * self.gust[i] + turb * Float::sqrt(1.0 - a * a) * n;
+                // Pas du filtre de rafale de Dryden (Gauss-Markov 1er ordre) :
+                // gust ← a·gust + turb·√(1−a²)·n. Le facteur √(1−a²) maintient la variance
+                // stationnaire à turb² ; RNG seedé ⇒ rafales reproductibles.
+                self.gust[i] = a * self.gust[i] + turb * Float::sqrt(1.0 - (a * a)) * n
             }
         }
         wind + self.gust

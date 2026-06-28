@@ -167,18 +167,23 @@ impl Ins {
     /// Joseph-form EKF update for a 3-vector measurement with isotropic noise.
     fn update3(&mut self, h: &Mat3_15, innov: Vec3, var: Real, chi2: Real) -> bool {
         let r = Matrix3::identity() * var;
+        // Covariance d'innovation S = H P Hᵀ + R (l'analogue 15 états de la mise à jour MEKF).
         let s = h * self.cov * h.transpose() + r;
         let s_inv = match s.try_inverse() {
             Some(inv) => inv,
             None => return false,
         };
+        // Test χ² : NIS = innovᵀ S⁻¹ innov (1×1) ; la mesure est rejetée si nis > chi2.
         let nis = (innov.transpose() * s_inv * innov)[(0, 0)];
         if nis > chi2 {
             return false;
         }
-        let k = self.cov * h.transpose() * s_inv; // 15x3
+        // Gain K = P Hᵀ S⁻¹, correction d'erreur dx = K·innov, injectée dans l'état nominal.
+        let k = self.cov * h.transpose() * s_inv;
         let dx = k * innov;
         self.inject(&dx);
+        // Mise à jour de covariance, forme de Joseph : garde P symétrique et semi-définie
+        // positive malgré l'arrondi.
         let ikh = Mat15::identity() - k * h;
         self.cov = ikh * self.cov * ikh.transpose() + k * r * k.transpose();
         self.symmetrize();
@@ -218,18 +223,24 @@ impl Estimator for Ins {
         let f = imu.accel - self.b_a; // f̂
 
         let r = self.q.to_rotation_matrix().into_inner(); // R̂ (pre-update)
-        let a_w = r * f + gravity_world(); // a_world = R̂ f̂ + g_w
-
-        // Nominal strapdown integration (½ a dt² in position).
-        self.p += self.v * dt + a_w * (0.5 * dt * dt);
+                                                          // Accélération inertielle en repère MONDE : a_w = R̂·f̂ + g_w. L'accéléromètre mesure
+                                                          // la force spécifique (en corps) ; on la tourne au monde puis on rajoute g. C'est LA
+                                                          // différence avec un AHRS : ici l'accéléro est une ENTRÉE de propagation, pas une
+                                                          // référence de verticale.
+        let a_w = r * f + gravity_world();
+        // Intégration strapdown : p ← p + v·dt + ½·a_w·dt² (ordre 2 en position), v ← v + a_w·dt.
+        self.p += self.v * dt + 0.5 * (a_w * dt * dt);
         self.v += a_w * dt;
+        // Intégration de l'attitude : incrément corps ω̂·dt (multiplication à droite) puis renorm.
         self.q *= UnitQuaternion::from_scaled_axis(omega * dt);
         self.q.renormalize();
-
         // F = I + F_c dt (only the nonzero off-diagonal blocks set explicitly).
         let i3 = Matrix3::identity();
         let mut fm = Mat15::identity();
         fm.fixed_view_mut::<3, 3>(0, 3).copy_from(&(i3 * dt)); // δp ← δv
+                                                               // Bloc PORTEUR de F : F[3:6, 6:9] = −R̂·[f̂]ₓ·dt. Une erreur d'attitude δθ fait mal
+                                                               // tourner la force spécifique → erreur de vitesse ; ce couplage rend attitude et biais
+                                                               // observables via le GPS dès qu'il y a accélération, et permet à l'INS de corriger l'attitude.
         fm.fixed_view_mut::<3, 3>(3, 6)
             .copy_from(&(-r * skew(f) * dt)); // δv ← δθ
         fm.fixed_view_mut::<3, 3>(3, 9).copy_from(&(-r * dt)); // δv ← δb_a
@@ -261,6 +272,8 @@ impl Estimator for Ins {
         qm.fixed_view_mut::<3, 3>(3, 0)
             .copy_from(&(i3 * (sa2 * dt * dt / 2.0)));
 
+        // Propagation temporelle de la covariance : P ← F P Fᵀ + Q (F transporte l'incertitude
+        // existante, Q ajoute le bruit IMU du pas).
         self.cov = fm * self.cov * fm.transpose() + qm;
         self.symmetrize();
     }

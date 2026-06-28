@@ -20,11 +20,13 @@ pub fn aerodynamic_wrench(
     body_torque: Vec3,
     wind_world: Vec3,
 ) -> Wrench {
-    let weight = gravity_world() * params.mass;
-    // Thrust pushes "up" = body -z; rotate body -> world.
+    // Poids = m·g, et poussée collective le long de −z corps (FRD : « vers le haut » = −z),
+    // ramenée au repère monde par l'attitude.
+    let weight = params.mass * gravity_world();
     let thrust_world = state.attitude * Vec3::new(0.0, 0.0, -collective_thrust);
-    let drag = (state.velocity - wind_world) * (-params.drag_coeff);
-
+    // Traînée linéaire, relative à l'air (v − v_vent) : un vent latéral pousse le quad ;
+    // le signe négatif l'oppose au mouvement relatif.
+    let drag = -params.drag_coeff * (state.velocity - wind_world);
     Wrench {
         force_world: weight + thrust_world + drag,
         moment_body: body_torque,

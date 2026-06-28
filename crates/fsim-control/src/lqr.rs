@@ -82,7 +82,10 @@ impl LqrController {
                 cfg.r_torque[i],
                 inertia_diag[i],
             );
-            // Closed-form 2×2 Riccati (see module docs).
+            // Solution analytique (forme fermée) de l'équation de Riccati 2×2 du double
+            // intégrateur par axe (ė = −ω, ω̇ = τ/I) minimisant J = ∫(q1·e² + q2·ω² + r·τ²).
+            // K_att = √(q1/r) (raideur, rappel vers la consigne), K_rate = √((2·p2+q2)/r)
+            // (amortissement), avec p2 = I·√(q1·r). Gains optimaux exacts, sans solveur.
             k_att[i] = Float::sqrt(q1 / r);
             let p2 = inertia * Float::sqrt(q1 * r);
             k_rate[i] = Float::sqrt((2.0 * p2 + q2) / r);

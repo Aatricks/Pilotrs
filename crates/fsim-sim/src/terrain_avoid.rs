@@ -236,7 +236,16 @@ impl TerrainAvoid {
                         self.turn_dir = Some(if floor_r <= floor_l { 1.0 } else { -1.0 });
                     }
                     let dir = self.turn_dir.unwrap_or(1.0);
-                    sp.course = self.escape_course(terrain, phat, &north, &east, route_course, alt, d_max, dir);
+                    sp.course = self.escape_course(
+                        terrain,
+                        phat,
+                        &north,
+                        &east,
+                        route_course,
+                        alt,
+                        d_max,
+                        dir,
+                    );
                     warn = true;
                 } else {
                     self.turn_dir = None; // route ahead is clear — resume it
@@ -290,7 +299,8 @@ impl TerrainAvoid {
         let mut d = self.cfg.scan_step;
         while d <= d_max + 1e-6 {
             let dir = gc_advance(phat, n, d);
-            let need = terrain.elevation(dir) + self.cfg.clearance - self.cfg.max_climb_gradient * d;
+            let need =
+                terrain.elevation(dir) + self.cfg.clearance - self.cfg.max_climb_gradient * d;
             if need > floor {
                 floor = need;
             }
@@ -376,7 +386,10 @@ mod tests {
     }
     impl TerrainHeight for Hill {
         fn elevation(&self, dir: Vec3) -> Real {
-            let c = dir.normalize().dot(&self.center.normalize()).clamp(-1.0, 1.0);
+            let c = dir
+                .normalize()
+                .dot(&self.center.normalize())
+                .clamp(-1.0, 1.0);
             let arc = c.acos() * PLANET_RADIUS;
             self.base + self.peak * (-(arc * arc) / (2.0 * self.sigma * self.sigma)).exp()
         }
@@ -414,8 +427,16 @@ mod tests {
         let mut ta = TerrainAvoid::new(cfg());
         let s = state_at(0.0, 0.0, 300.0, 0.0, 25.0);
         let out = ta.adjust(&s, sp(300.0, 0.0), &Flat(-5.0), 0.01);
-        assert!((out.altitude - 300.0).abs() < 1e-6, "alt drifted: {}", out.altitude);
-        assert!((out.course - 0.0).abs() < 1e-9, "course drifted: {}", out.course);
+        assert!(
+            (out.altitude - 300.0).abs() < 1e-6,
+            "alt drifted: {}",
+            out.altitude
+        );
+        assert!(
+            (out.course - 0.0).abs() < 1e-9,
+            "course drifted: {}",
+            out.course
+        );
         assert!(!ta.warn());
     }
 
@@ -442,7 +463,11 @@ mod tests {
         for _ in 0..2000 {
             out = ta.adjust(&s, sp(100.0, 0.0), &hill, 0.01);
         }
-        assert!(out.altitude > 120.0, "should climb for the hill: {}", out.altitude);
+        assert!(
+            out.altitude > 120.0,
+            "should climb for the hill: {}",
+            out.altitude
+        );
         assert!(ta.warn(), "should flag a terrain warning");
     }
 
@@ -482,7 +507,11 @@ mod tests {
         // 10 m above flat ground (below the 25 m hard floor), route wants to stay.
         let s = state_at(0.0, 0.0, 10.0, 0.0, 25.0);
         let out = ta.adjust(&s, sp(10.0, 0.0), &Flat(0.0), 0.01);
-        assert!(out.altitude > 10.0, "GPWS should command a climb: {}", out.altitude);
+        assert!(
+            out.altitude > 10.0,
+            "GPWS should command a climb: {}",
+            out.altitude
+        );
         assert!(ta.warn());
     }
 

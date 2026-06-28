@@ -32,9 +32,8 @@ mod terrain;
 use fsim_sim::planet;
 use fsim_sim::{
     Command, ControllerKind, FixedWingSetpoint, FwCommand, FwFaults, FwGuidanceConfig, FwSample,
-    TerminalAction,
     FwSimConfig, GuidanceConfig, QuadFaults, Quat, Recording, SensorFault, SensorFaults, Setpoint,
-    SimConfig, SurfaceFault, TelemetrySample, Waypoint,
+    SimConfig, SurfaceFault, TelemetrySample, TerminalAction, Waypoint,
 };
 use input::StickSource;
 use minimap::{Minimap, MinimapActions, MinimapView, Route, TerrainLike};

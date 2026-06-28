@@ -233,6 +233,9 @@ pub fn fixedwing_wrench(
     let cl_lin = p.cl0 + p.cl_alpha * alpha;
     let sa = Float::sin(alpha);
     let ca = Float::cos(alpha);
+    // Portance avec mélange de décrochage : sous le décrochage (σ≈0) cl suit la droite Cl_α ;
+    // au-delà (σ→1) il suit la courbe de plaque plane 2·signum(α)·sin²α·cosα (max vers 45°
+    // puis chute). Le mélange σ rend la transition continue (pas de saut qui casserait RK4).
     let cl_plate = 2.0 * Float::signum(alpha) * sa * sa * ca;
     let cl = (1.0 - sigma) * cl_lin + sigma * cl_plate + p.cl_q * cf * qq + p.cl_de * c.elevator;
     let cd = p.cd_p
@@ -262,6 +265,9 @@ pub fn fixedwing_wrench(
     //  * aileron authority fades to zero — you cannot pick a stalled wing back up
     //    with aileron, only by unstalling.
     // Below stall σ ≈ 0, so both are bit-for-bit the conventional model.
+    // Décrochage latéral (gated par σ) : l'amortissement en roulis s'inverse en
+    // anti-amortissement (autorotation — germe de vrille) et l'aileron perd son autorité.
+    // Sous le décrochage (σ≈0) on retrouve exactement le modèle conventionnel.
     let clp_eff = p.clp * (1.0 - sigma) + p.clp_spin * sigma;
     let cl_da_eff = p.cl_da * (1.0 - sigma);
     let cl_roll = p.cl0_roll
@@ -281,16 +287,26 @@ pub fn fixedwing_wrench(
     let f_lift = qbar * p.s * cl;
     let f_drag = qbar * p.s * cd;
     let f_y = qbar * p.s * cy;
+    // Rotation des axes de stabilité (portance ⟂ au vent, traînée ∥) vers le repère corps,
+    // tourné de l'incidence α autour de l'axe y : fx = −D·cosα + L·sinα, fz = −D·sinα − L·cosα.
+    // La portance « tire » vers le haut = −z corps.
     let mut fx = -f_drag * ca + f_lift * sa;
-    let fz = -f_drag * sa - f_lift * ca;
     let fy = f_y;
+    let fz = -f_drag * sa - f_lift * ca;
 
     // Propeller thrust along body +x.
     let kt = p.kmotor * c.throttle;
-    let thrust = Float::max(0.5 * p.rho * p.sprop * p.cprop * (kt * kt - va * va), 0.0);
+    // Poussée hélice (disque actuateur) : T = max(½·ρ·Sprop·Cprop·(kt²−Va²), 0). L'hélice
+    // accélère l'air de Va à kt ; bornée à ≥ 0, et → 0 quand Va → kt (fixe la vitesse max).
+    let thrust = Float::max(
+        0.5 * p.rho * p.sprop * p.cprop * ((kt * kt) - (va * va)),
+        0.0,
+    );
     fx += thrust;
 
     let f_body = Vec3::new(fx, fy, fz);
+    // Force nette en repère MONDE : les forces aéro/poussée (en corps) sont ramenées au monde
+    // par l'attitude, et on y ajoute la gravité (déjà fournie en repère monde par l'appelant).
     let force_world = state.attitude * f_body + gravity_world * p.mass;
 
     // --- moments (body frame) ---
@@ -343,8 +359,14 @@ pub fn trim(p: &FixedWingParams, va: Real, gamma: Real) -> Option<Trim> {
         };
         let wrench = fixedwing_wrench(&state, p, &controls, Vec3::zeros(), gravity_world());
         let d = rigid_body_deriv(&state, &wrench, p.mass, &p.inertia, &p.inertia_inv);
-        let a_body = state.attitude.inverse() * d.d_velocity;
-        Vec3::new(a_body.x, a_body.z, d.d_angular_rate.y)
+        // Résidu de trim (à annuler à l'équilibre) : accélération AVANT (x corps, réglée par
+        // les gaz), accélération NORMALE (z corps, réglée par α), accélération de TANGAGE q̇
+        // (réglée par la profondeur). Roulis/lacet/dérapage sont nuls par symétrie.
+        Vec3::new(
+            (state.attitude.inverse() * d.d_velocity).x,
+            (state.attitude.inverse() * d.d_velocity).z,
+            d.d_angular_rate.y,
+        )
     };
 
     // Start the throttle *above* the propeller's thrust dead-zone for this speed:
@@ -365,10 +387,20 @@ pub fn trim(p: &FixedWingParams, va: Real, gamma: Real) -> Option<Trim> {
         for k in 0..3 {
             let mut xp = x;
             xp[k] += h;
-            j.set_column(k, &((residual(&xp) - r) / h));
+            // Colonne k du Jacobien par différence finie avant : ∂r/∂x_k ≈ (r(x+h·eₖ) − r(x))/h.
+            // Dérivée numérique (pas à la main) ⇒ le Jacobien reste fidèle au modèle aéro réel.
+            let col = Vec3::new(
+                (residual(&xp).x - r.x) / h,
+                (residual(&xp).y - r.y) / h,
+                (residual(&xp).z - r.z) / h,
+            );
+            j.set_column(k, &col);
         }
         match j.try_inverse() {
-            Some(jinv) => x -= jinv * r,
+            Some(jinv) => {
+                // Pas de Newton : x ← x − J⁻¹·r (pousse le résidu vers 0). J singulier ⇒ abandon.
+                x -= jinv * r;
+            }
             None => break,
         }
         x[1] = x[1].clamp(-p.limits.surface_max, p.limits.surface_max);
@@ -473,6 +505,9 @@ pub fn short_period_modes(
         let q_dot = rigid_body_deriv(&state, &wrench, p.mass, &p.inertia, &p.inertia_inv)
             .d_angular_rate
             .y;
+        // Rotation de la trajectoire en tangage : α̇ = q + (u·Fz − w·Fx)/(m·Va²). À Va fixe,
+        // l'incidence tourne sous l'effet de la force normale. Gravité exclue (elle pilote le
+        // phugoïde lent, pas le mode court période linéarisé ici).
         let alpha_dot = q + (vb.x * f_body.z - vb.z * f_body.x) / (p.mass * va * va);
         (alpha_dot, q_dot)
     };
@@ -481,11 +516,17 @@ pub fn short_period_modes(
     let (base_a, base_q) = f(alpha_trim, 0.0);
     let (da_a, da_q) = f(alpha_trim + h, 0.0);
     let (dq_a, dq_q) = f(alpha_trim, h);
+    // Matrice d'état 2×2 A = ∂[α̇,q̇]/∂[α,q] par différences finies avant (base = valeur au
+    // trim, da_* = α perturbé de +h, dq_* = q perturbé de +h).
     let a00 = (da_a - base_a) / h;
     let a01 = (dq_a - base_a) / h;
     let a10 = (da_q - base_q) / h;
     let a11 = (dq_q - base_q) / h;
-
+    // Invariants de A : les valeurs propres d'une 2×2 ne dépendent que de sa trace et de son
+    // déterminant (polynôme caractéristique λ² − tr·λ + det = 0). Le signe du discriminant
+    // tr²−4·det décide : ≥ 0 ⇒ deux racines réelles (une > 0 = divergence pure, l'instabilité
+    // statique) ; < 0 ⇒ paire complexe (oscillation, divergente si tr > 0). Le bloc ci-dessous
+    // applique λ = (tr ± √disc)/2.
     let tr = a00 + a11;
     let det = a00 * a11 - a01 * a10;
     let discriminant = tr * tr - 4.0 * det;

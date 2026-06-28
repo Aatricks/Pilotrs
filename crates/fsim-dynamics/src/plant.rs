@@ -68,17 +68,15 @@ pub fn rigid_body_deriv(
     inertia: &Matrix3<Real>,
     inertia_inv: &Matrix3<Real>,
 ) -> StateDeriv {
-    // Translation (world frame): a = F / m.
+    // Translation (repère monde) : a = F / m. La vitesse est intégrée en repère monde
+    // (NED), donc la force y est ramenée avant division par la masse.
     let d_velocity = wrench.force_world / mass;
-
-    // Attitude kinematics: q̇ = ½ q ⊗ [0, ω_body].
+    // Cinématique d'attitude : q̇ = ½ q ⊗ [0, ω_body] (voir `attitude_kinematics`).
     let d_attitude = attitude_kinematics(&state.attitude, &state.angular_rate);
-
-    // Rotation (body frame): ω̇ = I⁻¹ (M − ω × Iω).  The gyroscopic term
-    // ω×Iω is what couples the axes for an asymmetric body.
+    // Rotation (repère corps) : ω̇ = I⁻¹ (M − ω × Iω). Le terme gyroscopique ω×Iω couple
+    // roulis/tangage/lacet dès que l'inertie est asymétrique (terme croisé Jxz de l'avion).
     let omega = state.angular_rate;
-    let gyroscopic = omega.cross(&(inertia * omega));
-    let d_angular_rate = inertia_inv * (wrench.moment_body - gyroscopic);
+    let d_angular_rate = inertia_inv * (wrench.moment_body - omega.cross(&(inertia * omega)));
 
     StateDeriv {
         d_position: state.velocity,

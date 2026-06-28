@@ -79,7 +79,8 @@ impl CascadedPid {
 
     /// Attitude loop: body-frame attitude error -> desired body rate.
     fn desired_rate(&self, est: &EstState, sp: &Setpoint) -> Vec3 {
-        // Error rotation expressed in the body frame: q_err = q_est⁻¹ · q_sp.
+        // Erreur d'attitude exprimée dans le repère CORPS : q_err = q_est⁻¹ · q_sp
+        // (directement utilisable comme commande de vitesse angulaire corps).
         let q_err = est.attitude.inverse() * sp.attitude;
         // Take the short way around the double cover (w >= 0).
         let q_err = if q_err.as_ref().w < 0.0 {
@@ -87,7 +88,12 @@ impl CascadedPid {
         } else {
             q_err
         };
-        let e = q_err.scaled_axis(); // rotation vector (body frame)
+        // Vecteur de rotation (axe·angle) de l'erreur : paramétrisation minimale, sans
+        // singularité près de zéro.
+        let e = q_err.scaled_axis();
+        // Boucle d'attitude (loi P) : convertit l'erreur d'orientation en une consigne de
+        // vitesse angulaire (gain par axe), ensuite saturée puis suivie par la boucle de
+        // vitesse interne (PID).
         let rate = Vec3::new(
             self.cfg.att_p.x * e.x,
             self.cfg.att_p.y * e.y,

@@ -183,6 +183,7 @@ impl FlyByWire {
     /// SAS + CAS: stabilize the airframe while tracking the pilot's rate commands.
     fn augmented(&self, est: &EstState, stick: &StickInput) -> FixedWingControls {
         let v_body = est.attitude.inverse() * est.velocity;
+        // Incidence α = atan2(w, u), rebouclée par la SAS pour synthétiser la stabilité statique.
         let alpha = Float::atan2(v_body.z, v_body.x);
         let va = est.velocity.norm();
         let (p, q, r) = (est.angular_rate.x, est.angular_rate.y, est.angular_rate.z);
@@ -190,16 +191,26 @@ impl FlyByWire {
         let va_s = Float::max(va, self.cfg.va_min);
         let q_bar = 0.5 * self.cfg.rho * va_s * va_s;
         let q_bar_ref = 0.5 * self.cfg.rho * self.cfg.va_ref * self.cfg.va_ref;
+        // Planning de gain « boost-only » : sched = clamp(q̄_ref/q̄, min, max) avec min ≥ 1
+        // — on ne descend jamais sous le gain nominal. Instabilité et autorité croissent
+        // toutes deux avec q̄, donc un planning ∝ 1/q̄ déstabiliserait ; ici on ne fait que
+        // booster à basse vitesse (q̄ faible ⇒ ratio > 1).
         let sched = (q_bar_ref / q_bar).clamp(self.cfg.sched.0, self.cfg.sched.1);
-
+        // CAS : le manche commande un TAUX (une réponse), pas une position de gouverne.
         let q_cmd = self.cfg.q_max * stick.pitch;
         let p_cmd = self.cfg.p_max * stick.roll;
-
+        // SAS profondeur : reboucle l'incidence (α − α_trim) et l'amortissement de tangage
+        // (q − q_cmd) pour synthétiser la stabilité statique manquante (sans elle, le mode
+        // court période diverge). Signe : autorité de profondeur négative (cf. en-tête module).
         let elevator = self.cfg.elevator_trim
             + sched
                 * (self.cfg.k_alpha * (alpha - self.cfg.alpha_trim) + self.cfg.k_q * (q - q_cmd));
+        // CAS ailerons : suit le taux de roulis commandé (p_cmd − p). Signe : ailerons positifs.
         let aileron = sched * self.cfg.k_roll * (p_cmd - p);
+        // Gouvernail : commande pilote directe + amortisseur de lacet (terme en r), qui
+        // amortit le roulis hollandais.
         let rudder = -stick.yaw * self.cfg.rudder_max + sched * self.cfg.k_yaw_damp * r;
+
         let throttle = stick.throttle;
         FixedWingControls {
             elevator,

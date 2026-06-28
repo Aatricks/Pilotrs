@@ -28,12 +28,19 @@ impl Integrator for Rk4 {
         let y0 = state.to_vector();
         let half = dt * 0.5;
 
+        // k1, k2 : les deux premières pentes RK4 (k1 au départ, k2 au milieu prédit par
+        // k1). Chaque étape intermédiaire passe par `State13::from_vector`, qui renormalise
+        // le quaternion d'attitude.
         let k1 = deriv(state).to_vector();
-        let k2 = deriv(&State13::from_vector(&(y0 + k1 * half))).to_vector();
-        let k3 = deriv(&State13::from_vector(&(y0 + k2 * half))).to_vector();
-        let k4 = deriv(&State13::from_vector(&(y0 + k3 * dt))).to_vector();
+        let k2 = deriv(&State13::from_vector(&(y0 + half * k1))).to_vector();
 
-        let y1 = y0 + (k1 + k2 * 2.0 + k3 * 2.0 + k4) * (dt / 6.0);
+        // k3 : pente au milieu corrigée par k2 ; k4 : pente en fin d'intervalle (pas complet dt).
+        let k3 = deriv(&State13::from_vector(&(y0 + half * k2))).to_vector();
+        let k4 = deriv(&State13::from_vector(&(y0 + dt * k3))).to_vector();
+
+        // Combinaison pondérée (poids 1,2,2,1)/6 = quadrature de Simpson → précision
+        // d'ordre 4 ; `from_vector` renormalise une dernière fois.
+        let y1 = y0 + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
         State13::from_vector(&y1)
     }
 }

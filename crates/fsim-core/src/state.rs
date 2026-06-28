@@ -124,8 +124,11 @@ impl StateDeriv {
 /// Returns the raw (non-unit) quaternion derivative.
 #[inline]
 pub fn attitude_kinematics(q: &Quat, omega_body: &Vec3) -> Quaternion<Real> {
-    let omega_quat = Quaternion::new(0.0, omega_body.x, omega_body.y, omega_body.z);
-    (q.as_ref() * omega_quat) * 0.5
+    // q̇ = ½ · q ⊗ [0, ω_body] : le quaternion « pur » [0, ω] (partie scalaire nulle)
+    // porte la vitesse angulaire corps. Convention Hamilton (q = q_{monde<-corps}), donc
+    // ω se multiplie à droite de q. Dérivée non unitaire : la renormalisation a lieu après
+    // l'intégration, dans `State13::from_vector`.
+    0.5 * q.as_ref() * Quaternion::new(0.0, omega_body.x, omega_body.y, omega_body.z)
 }
 
 #[cfg(test)]

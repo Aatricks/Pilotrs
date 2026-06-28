@@ -12,7 +12,6 @@ use crate::faults::FwFaults;
 use crate::fw_guidance::{FwGuidance, FwGuidanceConfig};
 use crate::guidance::Waypoint;
 use crate::terrain_avoid::{TerrainAvoid, TerrainAvoidConfig, TerrainHeight};
-use std::sync::Arc;
 use fsim_control::{
     FbwConfig, FixedWingAutopilot, FixedWingConfig, FixedWingController, FixedWingSetpoint,
     FlyByWire,
@@ -21,6 +20,7 @@ use fsim_core::{
     planet, EstState, FixedWingControls, Real, State13, StickInput, Tick, Vec3, DEFAULT_DT, GRAVITY,
 };
 use fsim_dynamics::{fixedwing_wrench, rigid_body_deriv, trim, FixedWingParams, Integrator, Rk4};
+use std::sync::Arc;
 
 /// One logged fixed-wing sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1331,7 +1331,10 @@ mod tests {
     }
     impl TerrainHeight for Hill {
         fn elevation(&self, dir: Vec3) -> Real {
-            let c = dir.normalize().dot(&self.center.normalize()).clamp(-1.0, 1.0);
+            let c = dir
+                .normalize()
+                .dot(&self.center.normalize())
+                .clamp(-1.0, 1.0);
             let arc = c.acos() * planet::PLANET_RADIUS;
             self.base + self.peak * (-(arc * arc) / (2.0 * self.sigma * self.sigma)).exp()
         }
@@ -1428,7 +1431,10 @@ mod tests {
             sim.step();
             max_cmd = max_cmd.max(sim.setpoint().altitude);
         }
-        assert!(max_cmd > 130.0, "should have climbed for the hill: {max_cmd}");
+        assert!(
+            max_cmd > 130.0,
+            "should have climbed for the hill: {max_cmd}"
+        );
         // Keep flying well past the hill over open low ground.
         for _ in 0..150_000 {
             sim.step();
@@ -1464,8 +1470,7 @@ mod tests {
 
         // Climb-only against the same wall: it cannot out-climb it and busts the
         // terrain (AGL goes negative).
-        let mut sim2 =
-            fw_over_hill(150.0, 25.0, hill_at(700.0, 0.0, 750.0, 200.0), false);
+        let mut sim2 = fw_over_hill(150.0, 25.0, hill_at(700.0, 0.0, 750.0, 200.0), false);
         let mut min_agl2 = f64::INFINITY;
         for _ in 0..90_000 {
             sim2.step();
@@ -1535,16 +1540,21 @@ mod tests {
             dmin = dmin.min(d);
             dmax = dmax.max(d);
         }
-        assert!(dmax < 450.0, "should loiter near the fix, not depart: dmax {dmax}");
-        assert!(dmin > 30.0, "should circle the fix, not sit on it: dmin {dmin}");
+        assert!(
+            dmax < 450.0,
+            "should loiter near the fix, not depart: dmax {dmax}"
+        );
+        assert!(
+            dmin > 30.0,
+            "should circle the fix, not sit on it: dmin {dmin}"
+        );
     }
 
     // Terrain avoidance adds no RNG: two runs are bit-for-bit identical.
     #[test]
     fn terrain_avoidance_is_deterministic() {
         let run = || {
-            let mut sim =
-                fw_over_hill(120.0, 25.0, hill_at(1000.0, 100.0, 400.0, 200.0), true);
+            let mut sim = fw_over_hill(120.0, 25.0, hill_at(1000.0, 100.0, 400.0, 200.0), true);
             sim.run_headless(60_000);
             *sim.truth()
         };
