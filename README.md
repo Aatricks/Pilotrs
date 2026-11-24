@@ -29,6 +29,7 @@ Everything is built on top of [`nalgebra`](https://nalgebra.org). The flight cor
 - **State Estimation**: Three estimators you can swap: a simple complementary filter, a 6-state MEKF (attitude + gyro bias), and a 15-state INS (GPS/baro/velocity/mag fusion). The INS is robust enough that pulling Gs won't mess up your attitude.
 - **Flight Controllers**: Swappable cascaded PID and LQR inner loops sharing a `Controller` trait. The quad has waypoint tracking, and the plane has a successive-loop autopilot to hold heading, altitude, and airspeed.
 - **Fly-by-Wire Fighter**: The fighter jet is aerodynamically unstable (negative static margin), so it crashes instantly without computer help. The onboard FCS uses angle-of-attack and rate feedback to stabilize it. You can press `F` to turn off the FCS and feel how bad the raw airframe actually is.
+- **Learned Air Data**: There is no pitot tube or AoA vane, so the FCS used to take angle of attack from the *ground* velocity, which is wrong in wind. A small neural network trained on the simulated sensors (IMU, baro, INS, controls) estimates the true *air* angle of attack instead. In the fighter's fly-by-wire loop it cuts the AoA error from 3.1° (Kalman) to 0.5° and makes the ride in turbulence about 40% smoother, nearly as good as a perfect sensor. See [the report](docs/learned-aoa-estimator.md).
 - **Interactive 3D Viewer**: Built with `three-d` and `egui`. Runs the simulator on a separate thread, lets you record/replay flight logs, run parallel Monte-Carlo simulations, drop waypoints on a map, and see live telemetry.
 
 
@@ -52,6 +53,9 @@ cargo run -p fsim-sim  --release --example montecarlo      # parallel Monte-Carl
 cargo run -p fsim-sim  --release --example pid_vs_lqr       # PID vs LQR step-response comparison
 cargo run -p fsim-sim  --release --example fixedwing_cruise # the fixed-wing climbs, turns, changes speed
 cargo run -p fsim-sim  --example record_replay             # record a run, reload it, replay it
+cargo run -p fsim-sim  --release --example aoa_nn -- dataset fighter fighter.csv 60  # learned AoA: record data
+uv run scripts/aoa_nn.py fighter.csv                        #   train the network, export weights
+cargo run -p fsim-sim  --release --example aoa_nn -- loop fighter.weights.txt     #   fly the FBW on it
 ```
 
 Once the viewer is running, you can use the UI panels to:
