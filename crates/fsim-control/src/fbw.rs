@@ -142,6 +142,9 @@ pub struct FlyByWire {
     /// Reserved for an optional pitch-rate integrator (not yet wired in); kept so
     /// the law can grow an integral term without an API change.
     _pitch_trim: Pid,
+    /// Externally supplied angle of attack \[rad\] (an air-data sensor or a
+    /// synthetic estimator). `None` ⇒ derive it from the estimate's velocity.
+    alpha_meas: Option<Real>,
 }
 
 impl FlyByWire {
@@ -150,7 +153,14 @@ impl FlyByWire {
         Self {
             cfg,
             _pitch_trim: Pid::new(0.0, 0.0, 0.0, sm, sm),
+            alpha_meas: None,
         }
+    }
+
+    /// Feed the SAS an angle of attack from outside (e.g. a learned air-data
+    /// estimator); `None` reverts to `atan2(w, u)` of the estimated velocity.
+    pub fn set_alpha(&mut self, alpha: Option<Real>) {
+        self.alpha_meas = alpha;
     }
 
     /// The configuration (gains, limits, trim references).
@@ -184,7 +194,9 @@ impl FlyByWire {
     fn augmented(&self, est: &EstState, stick: &StickInput) -> FixedWingControls {
         let v_body = est.attitude.inverse() * est.velocity;
         // Incidence α = atan2(w, u), rebouclée par la SAS pour synthétiser la stabilité statique.
-        let alpha = Float::atan2(v_body.z, v_body.x);
+        let alpha = self
+            .alpha_meas
+            .unwrap_or_else(|| Float::atan2(v_body.z, v_body.x));
         let va = est.velocity.norm();
         let (p, q, r) = (est.angular_rate.x, est.angular_rate.y, est.angular_rate.z);
 

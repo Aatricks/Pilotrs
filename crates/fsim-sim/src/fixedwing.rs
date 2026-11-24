@@ -305,6 +305,14 @@ impl FwSim {
         };
     }
 
+    /// Feed the fly-by-wire SAS an external angle of attack \[rad\] (`None` ⇒
+    /// its default `atan2(w, u)`). No-op unless in manual mode.
+    pub fn set_fbw_alpha(&mut self, alpha: Option<Real>) {
+        if let FwMode::Manual { fbw, .. } = &mut self.mode {
+            fbw.set_alpha(alpha);
+        }
+    }
+
     /// Update the pilot's stick demand. No-op unless in manual mode.
     pub fn set_stick(&mut self, s: StickInput) {
         if let FwMode::Manual { stick, .. } = &mut self.mode {
