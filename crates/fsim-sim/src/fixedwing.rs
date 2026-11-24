@@ -206,6 +206,8 @@ pub struct FwSim {
     fbw_cfg: FbwConfig,
     /// The air the aircraft flies through.
     atmosphere: Atmosphere,
+    /// Wind \[m/s, PCI\] used by the last physics step.
+    wind_world: Vec3,
     /// Injected effector / powerplant faults.
     faults: FwFaults,
     /// Crashed into the terrain — the aircraft is wreckage and stops flying.
@@ -251,6 +253,7 @@ impl FwSim {
             autopilot: Box::new(FixedWingAutopilot::new(cfg.autopilot)),
             fbw_cfg: cfg.fbw,
             atmosphere: Atmosphere::new(cfg.atmosphere),
+            wind_world: Vec3::zeros(),
             faults: FwFaults::none(),
             crashed: false,
             terrain: cfg.terrain,
@@ -417,6 +420,12 @@ impl FwSim {
         self.crashed
     }
 
+    /// Total wind (steady + gust + storm) \[m/s, PCI\] the last step flew in.
+    /// `truth().velocity − wind_world()` is the air-relative velocity.
+    pub fn wind_world(&self) -> Vec3 {
+        self.wind_world
+    }
+
     /// Steady wind speed \[m/s\] (for the HUD).
     pub fn wind_speed(&self) -> Real {
         self.atmosphere.wind_speed()
@@ -557,6 +566,7 @@ impl FwSim {
             .atmosphere
             .wind_ned(pos_n, pos_e, self.truth.velocity.norm(), self.dt);
         let wind_world = planet::pci_from_ned(self.truth.position) * wind_ned;
+        self.wind_world = wind_world;
 
         // Airframe-damage faults (tail loss) degrade the aero coefficients.
         let p = self.faults.apply_params(self.params);
